@@ -11,6 +11,8 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
 import java.util.ArrayList;
 import java.util.List;
 import javax.swing.BorderFactory;
@@ -27,9 +29,9 @@ import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.QuantityFormatter;
 
 /**
- * Sidebar panel: a one-click Start/Stop toggle, live session/trip totals, and - for
- * testing visibility - every tracked event listed on its own line under its trip, plus
- * an interactive row per unresolved death.
+ * Sidebar panel: a Start / Pause / Resume flip button, Stop and Restart, an optional boss
+ * name with a kill tally, the running session total, every tracked cost on its own line,
+ * and an interactive row per unresolved death.
  */
 class SessionCostTrackerPanel extends PluginPanel
 {
@@ -41,7 +43,17 @@ class SessionCostTrackerPanel extends PluginPanel
 
 	interface Controls
 	{
-		void onStartStop();
+		/** Flip: start when idle, pause when running, resume when paused. */
+		void onStartPauseResume();
+
+		void onStop();
+
+		void onRestart();
+
+		/** Manual +1 to the boss kill tally. */
+		void onBossKill();
+
+		void onBossName(String name);
 
 		void onConfirmDeath(int deathId, long fee);
 
@@ -51,7 +63,7 @@ class SessionCostTrackerPanel extends PluginPanel
 	@Value
 	static class EventLine
 	{
-		/** "supplies", "spell" or "death". */
+		/** "supplies", "spell", "teleport", "ammo" or "death". */
 		String kind;
 		String time;
 		String label;
@@ -60,19 +72,9 @@ class SessionCostTrackerPanel extends PluginPanel
 	}
 
 	@Value
-	static class TripView
-	{
-		int tripId;
-		boolean current;
-		long total;
-		List<EventLine> lines;
-	}
-
-	@Value
 	static class DeathRow
 	{
 		int deathId;
-		int tripId;
 		String itemSummary;
 		long estimatedFee;
 		long fullValue;
@@ -83,21 +85,29 @@ class SessionCostTrackerPanel extends PluginPanel
 	static class View
 	{
 		boolean active;
-		int currentTripId;
-		long currentTripCost;
+		boolean paused;
+		boolean finished;
 		long sessionTotal;
 		long atRisk;
-		List<TripView> trips;
+		String bossName;
+		int bossKills;
+		List<EventLine> events;
 		List<DeathRow> deaths;
 	}
 
 	private final Controls controls;
 
-	private final JButton toggle = new JButton("Start session");
+	private final JButton primaryBtn = new JButton("Start session");
+	private final JButton stopBtn = new JButton("Stop");
+	private final JButton restartBtn = new JButton("Restart");
+	private final JPanel secondaryRow = new JPanel(new GridLayout(1, 2, 4, 0));
+	private final JTextField bossField = new JTextField();
+	private final JButton killBtn = new JButton("+1 kill");
+	private final JLabel killsLabel = new JLabel();
 	private final JLabel sessionTotalLabel = new JLabel();
-	private final JLabel currentTripLabel = new JLabel();
+	private final JLabel stateLabel = new JLabel();
 	private final JLabel atRiskLabel = new JLabel();
-	private final JPanel tripsPanel = new JPanel();
+	private final JPanel eventsPanel = new JPanel();
 	private final JPanel deathsPanel = new JPanel();
 
 	SessionCostTrackerPanel(Controls controls)
@@ -107,60 +117,120 @@ class SessionCostTrackerPanel extends PluginPanel
 		setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 		setLayout(new BorderLayout(0, 8));
 
-		toggle.setFocusPainted(false);
-		toggle.addActionListener(e -> controls.onStartStop());
+		primaryBtn.setFocusPainted(false);
+		primaryBtn.addActionListener(e -> controls.onStartPauseResume());
+		stopBtn.setFocusPainted(false);
+		restartBtn.setFocusPainted(false);
+		stopBtn.addActionListener(e -> controls.onStop());
+		restartBtn.addActionListener(e -> controls.onRestart());
+		secondaryRow.add(stopBtn);
+		secondaryRow.add(restartBtn);
+		secondaryRow.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
+
+		bossField.setToolTipText("Boss name - kills of an NPC matching this bump the tally automatically");
+		bossField.addActionListener(e -> controls.onBossName(bossField.getText()));
+		bossField.addFocusListener(new FocusAdapter()
+		{
+			@Override
+			public void focusLost(FocusEvent e)
+			{
+				controls.onBossName(bossField.getText());
+			}
+		});
+		killBtn.setFont(FontManager.getRunescapeSmallFont());
+		killBtn.setFocusPainted(false);
+		killBtn.addActionListener(e -> controls.onBossKill());
+		killsLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 
 		final JPanel north = new JPanel();
 		north.setLayout(new BoxLayout(north, BoxLayout.Y_AXIS));
-		north.add(toggle);
-		north.add(box(6));
+		north.add(primaryBtn);
+		north.add(secondaryRow);
+		north.add(box(8));
+		north.add(labelledField("Boss", bossField));
+		final JPanel killRow = new JPanel(new BorderLayout(6, 0));
+		killRow.add(killsLabel, BorderLayout.CENTER);
+		killRow.add(killBtn, BorderLayout.EAST);
+		killRow.setBorder(BorderFactory.createEmptyBorder(3, 0, 0, 0));
+		killRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, killBtn.getPreferredSize().height + 4));
+		north.add(killRow);
+		north.add(box(8));
 
 		final JPanel totals = new JPanel(new GridLayout(0, 1, 0, 3));
 		sessionTotalLabel.setFont(sessionTotalLabel.getFont().deriveFont(Font.BOLD));
-		currentTripLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		stateLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		atRiskLabel.setForeground(DEATH_COLOR);
 		totals.add(sessionTotalLabel);
-		totals.add(currentTripLabel);
+		totals.add(stateLabel);
 		totals.add(atRiskLabel);
 		north.add(totals);
 		add(north, BorderLayout.NORTH);
 
 		final JPanel center = new JPanel();
 		center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
-		tripsPanel.setLayout(new BoxLayout(tripsPanel, BoxLayout.Y_AXIS));
+		eventsPanel.setLayout(new BoxLayout(eventsPanel, BoxLayout.Y_AXIS));
 		deathsPanel.setLayout(new BoxLayout(deathsPanel, BoxLayout.Y_AXIS));
-		center.add(sectionLabel("Trips"));
-		center.add(tripsPanel);
+		center.add(sectionLabel("Costs"));
+		center.add(eventsPanel);
 		center.add(box(10));
 		center.add(sectionLabel("Unresolved deaths"));
 		center.add(deathsPanel);
 		add(center, BorderLayout.CENTER);
 
-		render(new View(false, 0, 0, 0, 0, new ArrayList<>(), new ArrayList<>()));
+		render(new View(false, false, false, 0, 0, "", 0, new ArrayList<>(), new ArrayList<>()));
 	}
 
 	void render(View view)
 	{
-		toggle.setText(view.isActive() ? "Stop session" : "Start session");
-		toggle.setBackground(view.isActive()
-			? ColorScheme.PROGRESS_ERROR_COLOR
-			: ColorScheme.PROGRESS_COMPLETE_COLOR);
+		final boolean idle = !view.isActive();
+		primaryBtn.setText(idle ? "Start session" : view.isPaused() ? "Resume" : "Pause");
+		primaryBtn.setBackground(idle || view.isPaused()
+			? ColorScheme.PROGRESS_COMPLETE_COLOR
+			: ColorScheme.PROGRESS_INPROGRESS_COLOR);
+		secondaryRow.setVisible(view.isActive());
+
+		if (!bossField.isFocusOwner() && !bossField.getText().equals(view.getBossName()))
+		{
+			bossField.setText(view.getBossName());
+		}
+		killBtn.setEnabled(view.isActive());
+		killsLabel.setText("Kills: " + view.getBossKills());
 
 		sessionTotalLabel.setText("Session total: " + gp(view.getSessionTotal()));
-		currentTripLabel.setText(view.isActive()
-			? "Current trip #" + view.getCurrentTripId() + ": " + gp(view.getCurrentTripCost())
-			: " ");
+		if (view.isPaused())
+		{
+			stateLabel.setText("PAUSED");
+			stateLabel.setForeground(AMMO_COLOR);
+		}
+		else if (view.isFinished())
+		{
+			stateLabel.setText("Stopped");
+			stateLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		}
+		else if (view.isActive())
+		{
+			stateLabel.setText("Running");
+			stateLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		}
+		else
+		{
+			stateLabel.setText(" ");
+		}
+		if (view.getBossKills() > 0 && view.getSessionTotal() > 0)
+		{
+			stateLabel.setText(stateLabel.getText() + "  ·  "
+				+ gp(view.getSessionTotal() / view.getBossKills()) + "/kill");
+		}
 		atRiskLabel.setText(view.getAtRisk() > 0 ? "At risk: " + gp(view.getAtRisk()) : " ");
 
-		tripsPanel.removeAll();
-		if (view.getTrips().isEmpty())
+		eventsPanel.removeAll();
+		if (view.getEvents().isEmpty())
 		{
-			tripsPanel.add(muted(view.isActive() ? "No events yet" : "No trips with spending"));
+			eventsPanel.add(muted(view.isActive() ? "No costs yet" : "No session"));
 		}
-		for (TripView t : view.getTrips())
+		for (EventLine line : view.getEvents())
 		{
-			tripsPanel.add(tripBlock(t));
-			tripsPanel.add(box(6));
+			eventsPanel.add(eventLine(line));
 		}
 
 		deathsPanel.removeAll();
@@ -176,38 +246,6 @@ class SessionCostTrackerPanel extends PluginPanel
 
 		revalidate();
 		repaint();
-	}
-
-	private JPanel tripBlock(TripView t)
-	{
-		final JPanel block = new JPanel();
-		block.setLayout(new BoxLayout(block, BoxLayout.Y_AXIS));
-		block.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
-		block.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-
-		final JPanel header = new JPanel(new BorderLayout());
-		header.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		header.setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
-		final JLabel title = new JLabel("Trip #" + t.getTripId() + (t.isCurrent() ? "  (open)" : ""));
-		title.setFont(title.getFont().deriveFont(Font.BOLD));
-		final JLabel value = new JLabel(gp(t.getTotal()));
-		value.setFont(value.getFont().deriveFont(Font.BOLD));
-		value.setHorizontalAlignment(SwingConstants.RIGHT);
-		header.add(title, BorderLayout.WEST);
-		header.add(value, BorderLayout.EAST);
-		block.add(header);
-
-		if (t.getLines().isEmpty())
-		{
-			final JLabel none = muted("   no events");
-			none.setBorder(BorderFactory.createEmptyBorder(0, 4, 3, 4));
-			block.add(none);
-		}
-		for (EventLine line : t.getLines())
-		{
-			block.add(eventLine(line));
-		}
-		return block;
 	}
 
 	private JPanel eventLine(EventLine line)
@@ -245,8 +283,7 @@ class SessionCostTrackerPanel extends PluginPanel
 			BorderFactory.createEmptyBorder(4, 6, 4, 6)));
 		p.setBackground(ColorScheme.DARKER_GRAY_COLOR);
 
-		final JLabel head = new JLabel(String.format("Death (trip #%d) - lost %s",
-			d.getTripId(), gp(d.getFullValue())));
+		final JLabel head = new JLabel("Death - lost " + gp(d.getFullValue()));
 		head.setAlignmentX(Component.LEFT_ALIGNMENT);
 		p.add(head);
 
@@ -286,6 +323,17 @@ class SessionCostTrackerPanel extends PluginPanel
 		controlsRow.add(confirm);
 		controlsRow.add(free);
 		p.add(controlsRow);
+		return p;
+	}
+
+	private static JPanel labelledField(String label, JTextField field)
+	{
+		final JPanel p = new JPanel(new BorderLayout(6, 0));
+		final JLabel l = new JLabel(label);
+		l.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		p.add(l, BorderLayout.WEST);
+		p.add(field, BorderLayout.CENTER);
+		p.setMaximumSize(new Dimension(Integer.MAX_VALUE, field.getPreferredSize().height + 4));
 		return p;
 	}
 

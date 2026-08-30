@@ -14,7 +14,7 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
 import net.runelite.client.util.QuantityFormatter;
 
 /**
- * Optional in-game panel showing the running trip cost and session total. Only rendered
+ * Optional in-game panel showing the running session total and kill tally. Only rendered
  * while a session is active and {@code showOverlay} is enabled.
  */
 class SessionCostTrackerOverlay extends OverlayPanel
@@ -41,16 +41,23 @@ class SessionCostTrackerOverlay extends OverlayPanel
 		final SessionCostTrackerPanel.View v = plugin.currentView();
 
 		panelComponent.getChildren().add(TitleComponent.builder()
-			.text("Session cost")
+			.text("Session cost" + (v.isPaused() ? " (paused)" : ""))
 			.build());
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Trip #" + v.getCurrentTripId())
-			.right(gp(v.getCurrentTripCost()))
-			.build());
-		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Session")
+			.left("Total")
 			.right(gp(v.getSessionTotal()))
 			.build());
+		if (v.getBossKills() > 0)
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Kills")
+				.right(Integer.toString(v.getBossKills()))
+				.build());
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Per kill")
+				.right(gp(v.getSessionTotal() / v.getBossKills()))
+				.build());
+		}
 		if (v.getAtRisk() > 0)
 		{
 			panelComponent.getChildren().add(LineComponent.builder()

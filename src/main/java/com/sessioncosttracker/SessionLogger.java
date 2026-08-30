@@ -72,10 +72,10 @@ class SessionLogger
 		});
 	}
 
-	/** Start a line builder already stamped with the current time and trip id. */
-	Line line(String event, Integer tripId)
+	/** Start a line builder already stamped with the current time. */
+	Line line(String event)
 	{
-		return new Line(event, tripId);
+		return new Line(event);
 	}
 
 	Path path()
@@ -145,14 +145,10 @@ class SessionLogger
 	{
 		private final Map<String, Object> fields = new LinkedHashMap<>();
 
-		private Line(String event, Integer tripId)
+		private Line(String event)
 		{
 			fields.put("ts", Instant.now().toString());
 			fields.put("event", event);
-			if (tripId != null)
-			{
-				fields.put("tripId", tripId);
-			}
 		}
 
 		Line put(String key, Object value)

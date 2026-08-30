@@ -6,7 +6,9 @@ package com.sessioncosttracker;
 
 import java.util.HashMap;
 import java.util.Map;
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
@@ -26,45 +28,62 @@ public class AmmoTrackerTest
 	}
 
 	@Test
-	public void countsOnlyTheDrop()
+	public void firedRecoveredAndNet()
 	{
 		final AmmoTracker t = new AmmoTracker();
 		t.reset(owned(ARROW, 1000));
 
-		assertEquals(Long.valueOf(3), t.reconcile(owned(ARROW, 997), true).get(ARROW));
-		// pick one back up - no charge, just re-base
-		assertTrue(t.reconcile(owned(ARROW, 998), true).isEmpty());
-		// and it stays re-based: firing from 998 now
-		assertEquals(Long.valueOf(8), t.reconcile(owned(ARROW, 990), true).get(ARROW));
+		assertTrue(t.reconcile(owned(ARROW, 940), true));   // fired 60
+		assertTrue(t.reconcile(owned(ARROW, 955), true));   // picked 15 back up
+		assertArrayEquals(new long[]{60, 15, 45}, t.stats().get(ARROW));
 	}
 
 	@Test
-	public void deathWindowJustReBasesInsteadOfCharging()
+	public void aRiseBeyondWhatWasFiredIsARestockNotRecovery()
+	{
+		final AmmoTracker t = new AmmoTracker();
+		t.reset(owned(ARROW, 100));
+
+		t.reconcile(owned(ARROW, 90), true);          // fired 10
+		t.reconcile(owned(ARROW, 5000), true);        // bought a pile
+		// recovery capped at the 10 that were out there; net floors at 0
+		assertArrayEquals(new long[]{10, 10, 0}, t.stats().get(ARROW));
+		// and firing continues from the new baseline
+		t.reconcile(owned(ARROW, 4990), true);
+		assertArrayEquals(new long[]{20, 10, 10}, t.stats().get(ARROW));
+	}
+
+	@Test
+	public void deathWindowOnlyReBases()
 	{
 		final AmmoTracker t = new AmmoTracker();
 		t.reset(owned(ARROW, 500));
 
-		// died, lost the stack - not our cost to price
-		assertTrue(t.reconcile(owned(), false).isEmpty());
-		// reclaimed - comes back, still no charge
-		assertTrue(t.reconcile(owned(ARROW, 500), false).isEmpty());
-		// back to normal firing
-		assertEquals(Long.valueOf(2), t.reconcile(owned(ARROW, 498), true).get(ARROW));
+		assertFalse(t.reconcile(owned(), false));            // lost the lot to a death
+		assertFalse(t.reconcile(owned(ARROW, 500), false));  // reclaimed
+		assertNull(t.stats().get(ARROW));
+		assertTrue(t.reconcile(owned(ARROW, 498), true));    // normal firing resumes
+		assertArrayEquals(new long[]{2, 0, 2}, t.stats().get(ARROW));
 	}
 
 	@Test
-	public void handlesMultipleAmmoTypesAndFullDepletion()
+	public void tracksSeveralAmmoTypes()
 	{
 		final AmmoTracker t = new AmmoTracker();
 		t.reset(owned(ARROW, 200, BALL, 30));
 
-		final Map<Integer, Long> c = t.reconcile(owned(ARROW, 195, BALL, 24), true);
-		assertEquals(Long.valueOf(5), c.get(ARROW));
-		assertEquals(Long.valueOf(6), c.get(BALL));
+		t.reconcile(owned(ARROW, 195, BALL, 24), true);
+		assertArrayEquals(new long[]{5, 0, 5}, t.stats().get(ARROW));
+		assertArrayEquals(new long[]{6, 0, 6}, t.stats().get(BALL));
+	}
 
-		// cannon runs dry
-		assertEquals(Long.valueOf(24), t.reconcile(owned(ARROW, 195), true).get(BALL));
-		// reloading from the inventory later is a rise, not a refund
-		assertTrue(t.reconcile(owned(ARROW, 195, BALL, 30), true).isEmpty());
+	@Test
+	public void resetClearsTheTally()
+	{
+		final AmmoTracker t = new AmmoTracker();
+		t.reset(owned(ARROW, 100));
+		t.reconcile(owned(ARROW, 80), true);
+		t.reset(owned(ARROW, 80));
+		assertTrue(t.stats().isEmpty());
 	}
 }

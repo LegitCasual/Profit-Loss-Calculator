@@ -24,6 +24,7 @@ import java.util.regex.Pattern;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Actor;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.EquipmentInventorySlot;
@@ -32,8 +33,7 @@ import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
-import net.runelite.api.Player;
-import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.NPC;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
@@ -41,8 +41,6 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.VarbitChanged;
-import net.runelite.api.events.WidgetClosed;
-import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
@@ -66,19 +64,11 @@ import net.runelite.client.util.Text;
 @Slf4j
 @PluginDescriptor(
 	name = "Session Cost Tracker",
-	description = "Tracks the gp cost of a play session, broken down into bank/GE trips, with a session summary",
-	tags = {"cost", "gp", "profit", "loss", "session", "trip", "supplies", "death"}
+	description = "Tracks the gp a play session costs - supplies, spells, teleports, ammo and deaths - with a boss kill tally and a JSON log",
+	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death"}
 )
-public class SessionCostTrackerPlugin extends Plugin
-	implements TripManager.Listener, SessionCostTrackerPanel.Controls
+public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrackerPanel.Controls
 {
-	/**
-	 * Grand Exchange region id. Verified via WorldPoint.getRegionID() =
-	 * ((x&gt;&gt;6)&lt;&lt;8)|(y&gt;&gt;6) over the GE pen - the whole GE sits in this
-	 * one region. Add more ids here if a future GE expansion spills over.
-	 */
-	private static final int GE_REGION = 12598;
-
 	/** Ticks after death during which we watch the containers for the item loss. Items can
 	 *  be reclaimed almost instantly, so we track the *worst* dip, not a fixed snapshot. */
 	private static final int DEATH_WINDOW_TICKS = 10;
@@ -101,6 +91,9 @@ public class SessionCostTrackerPlugin extends Plugin
 	/** "Some of your dropped items are being held in a gravestone ...". */
 	private static final Pattern GRAVE_CREATED = Pattern.compile(
 		"held in a grave|gravestone.*near where you died");
+
+	/** Ignore a second boss "death" within this many ticks - multi-part bosses (Olm, Hydra). */
+	private static final int BOSS_KILL_DEBOUNCE_TICKS = 8;
 
 	private static final int AMMO_SLOT = EquipmentInventorySlot.AMMO.getSlotIdx();
 	private static final int WEAPON_SLOT = EquipmentInventorySlot.WEAPON.getSlotIdx();
@@ -129,6 +122,9 @@ public class SessionCostTrackerPlugin extends Plugin
 	private SessionCostTrackerConfig config;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private SessionLogger logger;
 
 	@Inject
@@ -145,15 +141,14 @@ public class SessionCostTrackerPlugin extends Plugin
 
 	private SessionCostTrackerPanel panel;
 	private NavigationButton navButton;
-	private TripManager tripManager;
 
-	/** The session being tracked, or the last finished one (kept for the panel). */
+	/** The session being tracked (running or paused), or the last finished one for the panel. */
 	private Session session;
+	/** True once {@link #stopSession} has finalised {@link #session} - it is now read-only. */
+	private boolean sessionFinished;
 
 	private Map<Integer, Integer> lastKnownInv = Collections.emptyMap();
 	private Map<Integer, Integer> lastKnownWorn = Collections.emptyMap();
-
-	private int prevRegion = -1;
 
 	// spell-cast de-dup within a game tick
 	private int lastCastTick = -1;
@@ -166,14 +161,19 @@ public class SessionCostTrackerPlugin extends Plugin
 
 	// ammo + teleport tracking
 	private final AmmoTracker ammoTracker = new AmmoTracker();
+	private boolean bankOpen;
 	/** teleport-jewellery variant id -&gt; charges it represents; built once, first session. */
 	private Map<Integer, Integer> teleChargesById = Collections.emptyMap();
-	private int lastTeleTabTick = -1;
-	private int lastTeleTabItemId = -1;
+	/** teleport-jewellery group base -&gt; gp value of one charge (best tradeable variant / its charges). */
+	private Map<Integer, Long> teleCostPerCharge = Collections.emptyMap();
+	/** union(inv, worn) at the end of last tick - teleport charge drops are read once per tick. */
+	private Map<Integer, Integer> prevTickItems = Collections.emptyMap();
+	/** item id -&gt; is it a teleport tablet/scroll (stackable, name mentions "teleport"). */
+	private final Map<Integer, Boolean> teleTabCache = new HashMap<>();
 	/** set by ammo reconciliation, flushed to the panel once per tick to avoid churn */
 	private boolean viewDirty;
-	/** bank UI open - pause ammo accrual so deposits/swaps aren't charged as consumption */
-	private boolean bankOpen;
+	/** tick the tracked boss last died - debounces multi-part boss deaths */
+	private int lastBossKillTick = -100;
 
 	// pending death tracking
 	private Map<Integer, Integer> preDeathState = Collections.emptyMap();
@@ -193,7 +193,7 @@ public class SessionCostTrackerPlugin extends Plugin
 	private final Map<Integer, DeathEntry> pendings = new LinkedHashMap<>();
 
 	private volatile SessionCostTrackerPanel.View currentView =
-		new SessionCostTrackerPanel.View(false, 0, 0, 0, 0,
+		new SessionCostTrackerPanel.View(false, false, false, 0, 0, "", 0,
 			Collections.emptyList(), Collections.emptyList());
 
 	@Provides
@@ -205,7 +205,6 @@ public class SessionCostTrackerPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		tripManager = new TripManager(config::tripDebounceTiles, this);
 		panel = new SessionCostTrackerPanel(this);
 
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "panel_icon.png");
@@ -223,14 +222,13 @@ public class SessionCostTrackerPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		if (tripManager != null && tripManager.isActive())
+		if (session != null && !sessionFinished)
 		{
 			stopSession();
 		}
 		overlayManager.remove(overlay);
 		clientToolbar.removeNavigation(navButton);
 		logger.close();
-		tripManager = null;
 		panel = null;
 		session = null;
 		pendings.clear();
@@ -238,24 +236,69 @@ public class SessionCostTrackerPlugin extends Plugin
 
 	// ------------------------------------------------------------------ panel controls
 
+	/** The flip button: start when idle, pause when running, resume when paused. */
 	@Override
-	public void onStartStop()
+	public void onStartPauseResume()
 	{
 		clientThread.invoke(() ->
 		{
-			if (tripManager == null)
-			{
-				return;
-			}
-			if (tripManager.isActive())
-			{
-				stopSession();
-			}
-			else
+			if (session == null || sessionFinished)
 			{
 				startSession();
 			}
+			else
+			{
+				setPaused(!session.isPaused());
+			}
 		});
+	}
+
+	@Override
+	public void onStop()
+	{
+		clientThread.invoke(() ->
+		{
+			if (session != null && !sessionFinished)
+			{
+				stopSession();
+			}
+		});
+	}
+
+	@Override
+	public void onRestart()
+	{
+		clientThread.invoke(() ->
+		{
+			if (session != null && !sessionFinished)
+			{
+				stopSession();
+			}
+			startSession();
+		});
+	}
+
+	@Override
+	public void onBossKill()
+	{
+		clientThread.invoke(() ->
+		{
+			if (session == null || sessionFinished)
+			{
+				return;
+			}
+			session.addBossKill();
+			logger.line("boss_kill").put("source", "manual").put("count", session.getBossKills()).submit();
+			refreshView();
+		});
+	}
+
+	@Override
+	public void onBossName(String name)
+	{
+		final String trimmed = name == null ? "" : name.trim();
+		configManager.setConfiguration(SessionCostTrackerConfig.GROUP, "bossName", trimmed);
+		clientThread.invoke(this::refreshView);
 	}
 
 	@Override
@@ -270,40 +313,11 @@ public class SessionCostTrackerPlugin extends Plugin
 		clientThread.invoke(() -> resolveDeath(deathId, 0, true));
 	}
 
-	// ------------------------------------------------------------------ trip listener
-
-	@Override
-	public void onTripOpened(Trip trip, String reason)
-	{
-		// re-base ammo at every boundary - unequipping / switching / depositing ammo at a
-		// bank or the GE is where the count legitimately jumps around
-		ammoTracker.reset(ammoOwned());
-		logger.line("trip_open", trip.getId()).put("reason", reason).submit();
-	}
-
-	@Override
-	public void onTripClosed(Trip trip, boolean collapsed)
-	{
-		logger.line("trip_close", trip.getId())
-			.put("collapsed", collapsed)
-			.put("consumables", trip.consumableTotal())
-			.put("spells", trip.spellTotal())
-			.put("teleports", trip.teleportTotal())
-			.put("ammo", trip.ammoTotal())
-			.put("ammoItems", ammoItemsLog(trip.getAmmoUnits()))
-			.put("deathConfirmed", trip.confirmedDeathTotal())
-			.submit();
-	}
-
 	// ------------------------------------------------------------------ session lifecycle
 
 	private void startSession()
 	{
 		final Instant now = Instant.now();
-		final WorldPoint wp = playerLocation();
-		final int region = wp != null ? wp.getRegionID() : -1;
-		final int x = wp != null ? wp.getX() : 0;
-		final int y = wp != null ? wp.getY() : 0;
 
 		lastKnownInv = ContainerSnapshot.of(client.getItemContainer(InventoryID.INV));
 		lastKnownWorn = ContainerSnapshot.of(client.getItemContainer(InventoryID.WORN));
@@ -314,16 +328,17 @@ public class SessionCostTrackerPlugin extends Plugin
 		deathLossAcc.clear();
 		recentReclaimFee = -1;
 		recentReclaimFeeTick = -1;
-		prevRegion = region;
+		lastBossKillTick = -100;
 		stateHistory.clear();
 		pushStateHistory();
 
-		lastTeleTabTick = -1;
-		lastTeleTabItemId = -1;
-		bankOpen = false;
+		teleTabCache.clear();
+		bankOpen = client.getWidget(InterfaceID.Bankmain.ITEMS) != null;
+		prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
 		if (teleChargesById.isEmpty())
 		{
 			teleChargesById = buildTeleChargeMap();
+			teleCostPerCharge = buildTelePerChargeCost();
 		}
 		ammoTracker.reset(ammoOwned());
 
@@ -331,15 +346,33 @@ public class SessionCostTrackerPlugin extends Plugin
 		{
 			logger.open(now);
 		}
-		logger.line("session_start", null).put("startedAt", now.toString()).submit();
+		logger.line("session_start")
+			.put("startedAt", now.toString())
+			.put("boss", config.bossName().isEmpty() ? null : config.bossName())
+			.submit();
 
-		session = tripManager.start(now, client.getTickCount(), x, y);
+		session = new Session(now);
+		sessionFinished = false;
+		refreshView();
+	}
+
+	private void setPaused(boolean paused)
+	{
+		if (session == null || sessionFinished || session.isPaused() == paused)
+		{
+			return;
+		}
+		session.setPaused(paused);
+		// re-base the trackers past the paused stretch so banking / afk doesn't accrue
+		ammoTracker.reset(ammoOwned());
+		prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		logger.line(paused ? "session_pause" : "session_resume").submit();
 		refreshView();
 	}
 
 	private void stopSession()
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (session == null || sessionFinished)
 		{
 			return;
 		}
@@ -348,8 +381,6 @@ public class SessionCostTrackerPlugin extends Plugin
 			deathWindowTicks = 0;
 			finalizeDeath();
 		}
-		final Instant now = Instant.now();
-		final Session finished = tripManager.stop(now);
 
 		for (DeathEntry e : pendings.values())
 		{
@@ -373,20 +404,29 @@ public class SessionCostTrackerPlugin extends Plugin
 			}
 		}
 
-		session = finished;
-		final SessionSummary summary = SessionSummary.of(finished);
-		logger.line("session_stop", null).submit();
-		logger.line("session_summary", null).put("summary", summary.toJsonFields()).submit();
+		session.setEndTime(Instant.now());
+		sessionFinished = true;
+
+		final SessionSummary summary = SessionSummary.of(session);
+		logger.line("session_stop")
+			.put("durationSeconds", java.time.Duration.between(session.getStartTime(), session.getEndTime()).getSeconds())
+			.put("summary", summary.toJsonFields())
+			.put("ammoItems", ammoItemsLog(session.getAmmoStats()))
+			.submit();
 		final Path file = logger.path();
 		logger.close();
 
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
 			final StringBuilder msg = new StringBuilder("[Session Cost Tracker] Session total: ")
-				.append(gp(finished.confirmedTotal()));
-			if (finished.atRiskTotal() > 0)
+				.append(gp(session.total()));
+			if (session.getBossKills() > 0)
 			{
-				msg.append(" (+").append(gp(finished.atRiskTotal())).append(" at risk)");
+				msg.append(" over ").append(session.getBossKills()).append(" kill(s)");
+			}
+			if (session.atRiskTotal() > 0)
+			{
+				msg.append(" (+").append(gp(session.atRiskTotal())).append(" at risk)");
 			}
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", msg.toString(), null);
 		}
@@ -415,7 +455,7 @@ public class SessionCostTrackerPlugin extends Plugin
 
 	private void logResolved(DeathEntry e, String outcome)
 	{
-		logger.line("death_resolved", e.getTripId())
+		logger.line("death_resolved")
 			.put("deathId", e.getId())
 			.put("outcome", outcome)
 			.put("gp", e.getResolvedCost())
@@ -430,8 +470,20 @@ public class SessionCostTrackerPlugin extends Plugin
 		final GameState state = event.getGameState();
 		if (state == GameState.LOGIN_SCREEN || state == GameState.HOPPING || state == GameState.CONNECTION_LOST)
 		{
-			prevRegion = -1;
+			bankOpen = false;
 		}
+	}
+
+	/** A session exists and has not been stopped (may be paused). */
+	private boolean tracking()
+	{
+		return session != null && !sessionFinished;
+	}
+
+	/** A session is running and not paused - costs should accrue. */
+	private boolean accruing()
+	{
+		return tracking() && !session.isPaused();
 	}
 
 	@Subscribe
@@ -443,8 +495,6 @@ public class SessionCostTrackerPlugin extends Plugin
 			return;
 		}
 
-		final Map<Integer, Integer> before = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
-
 		if (id == InventoryID.INV)
 		{
 			lastKnownInv = ContainerSnapshot.of(event.getItemContainer());
@@ -454,7 +504,7 @@ public class SessionCostTrackerPlugin extends Plugin
 			lastKnownWorn = ContainerSnapshot.of(event.getItemContainer());
 		}
 
-		if (tripManager == null || !tripManager.isActive())
+		if (!tracking())
 		{
 			return;
 		}
@@ -465,17 +515,13 @@ public class SessionCostTrackerPlugin extends Plugin
 		}
 		checkContainerReturn();
 
-		reconcileAmmo(deathWindowTicks == 0 && !bankOpen);
-		if (deathWindowTicks == 0)
-		{
-			detectTeleports(before, ContainerSnapshot.union(lastKnownInv, lastKnownWorn));
-		}
+		reconcileAmmo(deathWindowTicks == 0 && !bankOpen && !session.isPaused());
 	}
 
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (!tracking())
 		{
 			return;
 		}
@@ -484,30 +530,29 @@ public class SessionCostTrackerPlugin extends Plugin
 			|| vp == VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO
 			|| vp == VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO_AMOUNT)
 		{
-			reconcileAmmo(deathWindowTicks == 0 && !bankOpen);
+			reconcileAmmo(deathWindowTicks == 0 && !bankOpen && !session.isPaused());
 		}
 	}
 
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (!tracking())
 		{
 			return;
 		}
-		final WorldPoint wp = playerLocation();
-		if (wp != null)
-		{
-			final int region = wp.getRegionID();
-			if (prevRegion != -1 && prevRegion != GE_REGION && region == GE_REGION)
-			{
-				cutTrip("grand-exchange", wp);
-			}
-			prevRegion = region;
-			tripManager.updatePosition(wp.getX(), wp.getY());
-		}
-
+		updateBankState();
 		pushStateHistory();
+
+		// teleport charge drops are read once per tick so equipping / unequipping jewellery
+		// (item moves inv<->worn within a tick, net zero) never looks like a teleport.
+		// Skip while banking / paused - a deposit would look like spending the last charge.
+		final Map<Integer, Integer> curItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		if (deathWindowTicks == 0 && !bankOpen && !session.isPaused() && !prevTickItems.isEmpty())
+		{
+			detectTeleports(prevTickItems, curItems);
+		}
+		prevTickItems = curItems;
 
 		if (deathWindowTicks > 0)
 		{
@@ -528,7 +573,7 @@ public class SessionCostTrackerPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (!tracking())
 		{
 			return;
 		}
@@ -589,42 +634,30 @@ public class SessionCostTrackerPlugin extends Plugin
 		return h.get(idx);
 	}
 
-	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded event)
+	/**
+	 * Bank open/close, read from the item-container widget each tick - {@code WidgetClosed}
+	 * doesn't fire reliably for the bank. While open, ammo/teleport accrual pauses; on close
+	 * the trackers re-base past whatever was deposited/withdrawn/swapped.
+	 */
+	private void updateBankState()
 	{
-		if (tripManager == null || !tripManager.isActive())
+		final boolean nowBank = client.getWidget(InterfaceID.Bankmain.ITEMS) != null;
+		if (nowBank == bankOpen)
 		{
 			return;
 		}
-		if (event.getGroupId() == InterfaceID.BANKMAIN)
+		bankOpen = nowBank;
+		if (!nowBank)
 		{
-			bankOpen = true;
-			final WorldPoint wp = playerLocation();
-			if (wp != null)
-			{
-				cutTrip("bank", wp);
-			}
-		}
-	}
-
-	@Subscribe
-	public void onWidgetClosed(WidgetClosed event)
-	{
-		if (event.getGroupId() == InterfaceID.BANKMAIN)
-		{
-			bankOpen = false;
-			// swapping/depositing ammo at the bank shifts the counts around - re-base past it
-			if (tripManager != null && tripManager.isActive())
-			{
-				ammoTracker.reset(ammoOwned());
-			}
+			ammoTracker.reset(ammoOwned());
+			prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
 		}
 	}
 
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (!accruing())
 		{
 			return;
 		}
@@ -634,37 +667,26 @@ public class SessionCostTrackerPlugin extends Plugin
 			handleConsumable(event);
 			return;
 		}
-		if ("Bank".equals(option))
-		{
-			final WorldPoint wp = playerLocation();
-			if (wp != null)
-			{
-				cutTrip("bank", wp);
-			}
-			return;
-		}
-		if ("Break".equals(option))
-		{
-			handleTeleportTab(event);
-			return;
-		}
 		handleSpell(event);
 	}
 
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
-		if (tripManager == null || !tripManager.isActive())
+		if (!tracking())
 		{
 			return;
 		}
-		if (event.getActor() != client.getLocalPlayer())
+		final Actor actor = event.getActor();
+		if (actor instanceof NPC)
 		{
+			if (accruing())
+			{
+				handleBossKill((NPC) actor);
+			}
 			return;
 		}
-
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
+		if (actor != client.getLocalPlayer())
 		{
 			return;
 		}
@@ -674,13 +696,40 @@ public class SessionCostTrackerPlugin extends Plugin
 		deathGraveConfirmed = false;
 		deathWindowTicks = DEATH_WINDOW_TICKS;
 
-		// register the entry immediately so the trip can't be collapsed before the loss is known
-		pendingDeath = new DeathEntry(session.nextDeathId(), trip.getId(), Instant.now(),
-			Collections.emptyMap(), 0);
-		trip.add(pendingDeath);
+		pendingDeath = new DeathEntry(session.nextDeathId(), Instant.now(), Collections.emptyMap(), 0);
+		session.add(pendingDeath);
 		pendings.put(pendingDeath.getId(), pendingDeath);
 		accumulateDeathLoss();
-		logger.line("death", trip.getId()).put("deathId", pendingDeath.getId()).submit();
+		logger.line("death").put("deathId", pendingDeath.getId()).submit();
+		refreshView();
+	}
+
+	/** A tracked boss died: bump the session kill tally. */
+	private void handleBossKill(NPC npc)
+	{
+		final String boss = config.bossName().trim();
+		if (boss.isEmpty())
+		{
+			return;
+		}
+		final String name = npc.getName();
+		if (name == null || !name.toLowerCase().contains(boss.toLowerCase()))
+		{
+			return;
+		}
+		final int tick = client.getTickCount();
+		if (tick - lastBossKillTick < BOSS_KILL_DEBOUNCE_TICKS)
+		{
+			return;
+		}
+		lastBossKillTick = tick;
+
+		session.addBossKill();
+		logger.line("boss_kill")
+			.put("source", "auto")
+			.put("boss", name)
+			.put("count", session.getBossKills())
+			.submit();
 		refreshView();
 	}
 
@@ -730,7 +779,7 @@ public class SessionCostTrackerPlugin extends Plugin
 
 		if (lost.isEmpty())
 		{
-			logger.line("death_no_loss", e.getTripId())
+			logger.line("death_no_loss")
 				.put("deathId", e.getId())
 				.put("preDeathItems", preDeathState.size())
 				.submit();
@@ -741,7 +790,7 @@ public class SessionCostTrackerPlugin extends Plugin
 		final long full = deathCostService.geValue(lost);
 		e.setLoss(lost, full);
 		e.setEstimatedFee(deathCostService.graveFeeEstimate(lost, isIronman()));
-		logger.line("death_pending", e.getTripId())
+		logger.line("death_pending")
 			.put("deathId", e.getId())
 			.put("fullValue", full)
 			.put("estimatedFee", e.getEstimatedFee())
@@ -815,7 +864,7 @@ public class SessionCostTrackerPlugin extends Plugin
 			e.setState(DeathEntry.State.RETURNED);
 			e.setEstimatedFee(deathCostService.graveFeeEstimate(e.getLostItems(), isIronman()));
 			e.setUserConfirmed(false);
-			logger.line("death_returned", e.getTripId())
+			logger.line("death_returned")
 				.put("deathId", e.getId())
 				.put("via", "container")
 				.put("estimatedFee", e.getEstimatedFee())
@@ -856,16 +905,11 @@ public class SessionCostTrackerPlugin extends Plugin
 		{
 			return;
 		}
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
-		{
-			return;
-		}
 		lastConsumeTick = tick;
 		lastConsumeItemId = itemId;
-		trip.add(new CostEvent(CostEvent.Type.CONSUMABLE, Instant.now(), trip.getId(),
+		session.add(new CostEvent(CostEvent.Type.CONSUMABLE, Instant.now(),
 			c.getItemId(), 1, c.getGp(), c.getName(), null));
-		logger.line("consumable", trip.getId())
+		logger.line("consumable")
 			.put("itemId", c.getItemId())
 			.put("item", c.getName())
 			.put("qty", 1)
@@ -947,22 +991,18 @@ public class SessionCostTrackerPlugin extends Plugin
 		}
 		// always reconcile so the baseline stays current; only charge when tracking is on
 		// and not paused (death window / bank open)
-		final Map<Integer, Long> consumed =
-			ammoTracker.reconcile(ammoOwned(), accrue && config.trackAmmo());
-		if (consumed.isEmpty())
+		final boolean moved = ammoTracker.reconcile(ammoOwned(), accrue && config.trackAmmo());
+		if (!moved)
 		{
 			return;
 		}
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
+		final Map<Integer, long[]> stats = ammoTracker.stats();
+		long gp = 0;
+		for (Map.Entry<Integer, long[]> e : stats.entrySet())
 		{
-			return;
+			gp += e.getValue()[2] * Math.max(0, itemManager.getItemPrice(e.getKey()));
 		}
-		consumed.forEach((itemId, units) ->
-		{
-			final long gp = Math.max(0, itemManager.getItemPrice(itemId)) * units;
-			trip.addAmmo(itemId, units, gp);
-		});
+		session.setAmmo(stats, gp);
 		viewDirty = true;
 	}
 
@@ -979,6 +1019,36 @@ public class SessionCostTrackerPlugin extends Plugin
 		return m;
 	}
 
+	/**
+	 * group base -&gt; gp of one charge, taken from the highest-charge variant that actually
+	 * has a GE price. Used when a specific charge tier is untradeable (glory(5)/(6)) so the
+	 * marginal price would come out zero.
+	 */
+	private Map<Integer, Long> buildTelePerChargeCost()
+	{
+		final Map<Integer, Long> perCharge = new HashMap<>();
+		TeleportCharges.groups().forEach((base, variants) ->
+		{
+			int bestCharges = 0;
+			long best = 0;
+			for (int id : variants)
+			{
+				final int ch = teleChargesById.getOrDefault(id, 0);
+				final long price = Math.max(0, itemManager.getItemPrice(id));
+				if (ch > 0 && price > 0 && ch >= bestCharges)
+				{
+					bestCharges = ch;
+					best = price / ch;
+				}
+			}
+			if (best > 0)
+			{
+				perCharge.put(base, best);
+			}
+		});
+		return perCharge;
+	}
+
 	private static int parseCharges(String name)
 	{
 		final Matcher m = CHARGE_SUFFIX.matcher(name);
@@ -991,31 +1061,74 @@ public class SessionCostTrackerPlugin extends Plugin
 		{
 			return;
 		}
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
-		{
-			return;
-		}
 		boolean changed = false;
+
 		for (TeleportCharges.Charge c : TeleportCharges.detect(before, after, teleChargesById))
 		{
-			final long fromPrice = Math.max(0, itemManager.getItemPrice(c.getFromId()));
-			final long toPrice = c.getToId() > 0 ? Math.max(0, itemManager.getItemPrice(c.getToId())) : 0;
-			final long gp = Math.max(0, fromPrice - toPrice);
+			final long gp = teleportCost(c);
 			final String label = teleportLabel(c);
-			trip.add(new CostEvent(CostEvent.Type.TELEPORT, Instant.now(), trip.getId(),
+			session.add(new CostEvent(CostEvent.Type.TELEPORT, Instant.now(),
 				c.getFromId(), (int) c.getChargesUsed(), gp, label, null));
-			logger.line("teleport", trip.getId())
+			logger.line("teleport")
 				.put("item", label)
 				.put("charges", c.getChargesUsed())
 				.put("gp", gp)
 				.submit();
 			changed = true;
 		}
+
+		// teleport tablets / scrolls: a stackable "* teleport" item that left the inventory
+		for (Map.Entry<Integer, Integer> e : before.entrySet())
+		{
+			final int id = e.getKey();
+			final int used = e.getValue() - after.getOrDefault(id, 0);
+			if (used <= 0 || used > 3 || !isTeleportTab(id))
+			{
+				continue;
+			}
+			final String name = itemName(id);
+			final long gp = Math.max(0, itemManager.getItemPrice(id)) * used;
+			session.add(new CostEvent(CostEvent.Type.TELEPORT, Instant.now(),
+				id, used, gp, name, null));
+			logger.line("teleport")
+				.put("itemId", id)
+				.put("item", name)
+				.put("qty", used)
+				.put("gp", gp)
+				.submit();
+			changed = true;
+		}
+
 		if (changed)
 		{
 			refreshView();
 		}
+	}
+
+	private boolean isTeleportTab(int id)
+	{
+		return teleTabCache.computeIfAbsent(id, k ->
+		{
+			final ItemComposition comp = itemManager.getItemComposition(k);
+			return comp != null
+				&& comp.isStackable()
+				&& comp.getName().toLowerCase().contains("teleport");
+		});
+	}
+
+	/**
+	 * Marginal GE price of the charges used - {@code price(from) - price(to)} - when both
+	 * tiers are tradeable; otherwise the per-charge fallback (untradeable glory(5)/(6) etc).
+	 */
+	private long teleportCost(TeleportCharges.Charge c)
+	{
+		final long fromPrice = Math.max(0, itemManager.getItemPrice(c.getFromId()));
+		final long toPrice = c.getToId() > 0 ? Math.max(0, itemManager.getItemPrice(c.getToId())) : 0;
+		if (fromPrice > 0 && (c.getToId() < 0 || toPrice > 0) && fromPrice >= toPrice)
+		{
+			return fromPrice - toPrice;
+		}
+		return teleCostPerCharge.getOrDefault(c.getBase(), 0L) * c.getChargesUsed();
 	}
 
 	private String teleportLabel(TeleportCharges.Charge c)
@@ -1024,53 +1137,6 @@ public class SessionCostTrackerPlugin extends Plugin
 		final int from = teleChargesById.getOrDefault(c.getFromId(), 0);
 		final int to = c.getToId() > 0 ? teleChargesById.getOrDefault(c.getToId(), 0) : 0;
 		return base + " (" + from + "→" + to + ")";
-	}
-
-	private void handleTeleportTab(MenuOptionClicked event)
-	{
-		if (!config.trackTeleports() || session == null)
-		{
-			return;
-		}
-		int itemId = event.getItemId();
-		if (itemId <= 0)
-		{
-			final Widget widget = event.getWidget();
-			if (widget != null)
-			{
-				itemId = widget.getItemId();
-			}
-		}
-		if (itemId <= 0)
-		{
-			return;
-		}
-		final int tick = client.getTickCount();
-		if (tick == lastTeleTabTick && itemId == lastTeleTabItemId)
-		{
-			return;
-		}
-		final ItemComposition comp = itemManager.getItemComposition(itemId);
-		if (comp == null || !comp.getName().toLowerCase().contains("teleport"))
-		{
-			return;
-		}
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
-		{
-			return;
-		}
-		lastTeleTabTick = tick;
-		lastTeleTabItemId = itemId;
-		final long gp = Math.max(0, itemManager.getItemPrice(itemId));
-		trip.add(new CostEvent(CostEvent.Type.TELEPORT, Instant.now(), trip.getId(),
-			itemId, 1, gp, comp.getName(), null));
-		logger.line("teleport", trip.getId())
-			.put("itemId", itemId)
-			.put("item", comp.getName())
-			.put("gp", gp)
-			.submit();
-		refreshView();
 	}
 
 	private void handleSpell(MenuOptionClicked event)
@@ -1124,15 +1190,10 @@ public class SessionCostTrackerPlugin extends Plugin
 		lastCastTick = tick;
 		lastCastComponent = componentId;
 
-		final Trip trip = session.getCurrentTrip();
-		if (trip == null)
-		{
-			return;
-		}
 		final SpellCostService.Priced priced = spellCostService.price(spell);
-		trip.add(new CostEvent(CostEvent.Type.SPELL, Instant.now(), trip.getId(),
+		session.add(new CostEvent(CostEvent.Type.SPELL, Instant.now(),
 			-1, 1, priced.getGp(), spell.getDisplayName(), priced.getBreakdown()));
-		logger.line("spell_cast", trip.getId())
+		logger.line("spell_cast")
 			.put("spell", spell.getDisplayName())
 			.put("gp", priced.getGp())
 			.put("runes", priced.getBreakdown())
@@ -1140,19 +1201,11 @@ public class SessionCostTrackerPlugin extends Plugin
 		refreshView();
 	}
 
-	private void cutTrip(String reason, WorldPoint wp)
-	{
-		if (tripManager.boundary(reason, Instant.now(), client.getTickCount(), wp.getX(), wp.getY()))
-		{
-			refreshView();
-		}
-	}
-
 	// ------------------------------------------------------------------ view / helpers
 
 	boolean isSessionActive()
 	{
-		return tripManager != null && tripManager.isActive();
+		return session != null && !sessionFinished;
 	}
 
 	SessionCostTrackerPanel.View currentView()
@@ -1178,49 +1231,33 @@ public class SessionCostTrackerPlugin extends Plugin
 	{
 		if (session == null)
 		{
-			return new SessionCostTrackerPanel.View(false, 0, 0, 0, 0,
-				Collections.emptyList(), Collections.emptyList());
-		}
-
-		final boolean active = isSessionActive();
-		final Trip cur = session.getCurrentTrip();
-		final int curId = cur != null ? cur.getId() : 0;
-		final long curCost = cur != null ? cur.total() : 0;
-
-		final List<Trip> shownTrips = new ArrayList<>(session.getTrips());
-		if (cur != null && active)
-		{
-			shownTrips.add(cur);
-		}
-
-		final List<SessionCostTrackerPanel.TripView> trips = new ArrayList<>();
-		for (Trip t : shownTrips)
-		{
-			trips.add(new SessionCostTrackerPanel.TripView(
-				t.getId(), t == cur, t.total(), tripLines(t)));
+			return new SessionCostTrackerPanel.View(false, false, false, 0, 0,
+				config.bossName(), 0, Collections.emptyList(), Collections.emptyList());
 		}
 
 		final List<SessionCostTrackerPanel.DeathRow> deaths = new ArrayList<>();
-		for (DeathEntry e : session.allDeaths())
+		for (DeathEntry e : session.getDeaths())
 		{
 			if (e.getLostItems().isEmpty() || e.isCounted())
 			{
 				continue;
 			}
-			final long shownFee = e.getEstimatedFee();
-			deaths.add(new SessionCostTrackerPanel.DeathRow(e.getId(), e.getTripId(),
-				namedItemsText(e.getLostItems()), shownFee, e.getFullValue(),
+			deaths.add(new SessionCostTrackerPanel.DeathRow(e.getId(),
+				namedItemsText(e.getLostItems()), e.getEstimatedFee(), e.getFullValue(),
 				e.getState() != DeathEntry.State.PENDING));
 		}
 
-		return new SessionCostTrackerPanel.View(active, curId, curCost,
-			session.confirmedTotal(), session.atRiskTotal(), trips, deaths);
+		return new SessionCostTrackerPanel.View(
+			!sessionFinished, session.isPaused(), sessionFinished,
+			session.total(), session.atRiskTotal(),
+			config.bossName(), session.getBossKills(),
+			eventLines(session), deaths);
 	}
 
-	private List<SessionCostTrackerPanel.EventLine> tripLines(Trip trip)
+	private List<SessionCostTrackerPanel.EventLine> eventLines(Session s)
 	{
 		final List<SessionCostTrackerPanel.EventLine> lines = new ArrayList<>();
-		for (CostEvent ev : trip.getEvents())
+		for (CostEvent ev : s.getEvents())
 		{
 			final String kind;
 			final String label;
@@ -1242,7 +1279,7 @@ public class SessionCostTrackerPlugin extends Plugin
 			lines.add(new SessionCostTrackerPanel.EventLine(
 				kind, LINE_TIME.format(ev.getTime()), label, ev.getGp(), breakdownText(ev.getDetail())));
 		}
-		for (DeathEntry d : trip.getDeaths())
+		for (DeathEntry d : s.getDeaths())
 		{
 			if (!d.isCounted())
 			{
@@ -1260,37 +1297,48 @@ public class SessionCostTrackerPlugin extends Plugin
 		}
 		lines.sort(Comparator.comparing(SessionCostTrackerPanel.EventLine::getTime));
 
-		if (trip.ammoTotal() > 0)
+		if (s.ammoTotal() > 0)
 		{
 			lines.add(new SessionCostTrackerPanel.EventLine(
-				"ammo", "", "Ammo used", trip.ammoTotal(), ammoBreakdown(trip.getAmmoUnits())));
+				"ammo", "", "Ammo used", s.ammoTotal(), ammoBreakdown(s.getAmmoStats())));
 		}
 		return lines;
 	}
 
-	private String ammoBreakdown(Map<Integer, Long> units)
+	/** "Adamant dart — 540 fired, 120 recovered, 420 charged" per line, most-charged first. */
+	private String ammoBreakdown(Map<Integer, long[]> stats)
 	{
-		final StringBuilder sb = new StringBuilder();
+		final List<Map.Entry<Integer, long[]>> rows = new ArrayList<>(stats.entrySet());
+		rows.sort((a, b) -> Long.compare(b.getValue()[2], a.getValue()[2]));
+
+		final StringBuilder sb = new StringBuilder("<html>");
 		int shown = 0;
-		for (Map.Entry<Integer, Long> e : units.entrySet())
+		for (Map.Entry<Integer, long[]> e : rows)
 		{
-			if (e.getValue() <= 0)
+			final long[] v = e.getValue();
+			if (v[0] <= 0)
 			{
 				continue;
 			}
-			if (shown == 5)
+			if (shown == 8)
 			{
-				sb.append(", …");
+				sb.append("…<br>");
 				break;
 			}
-			if (sb.length() > 0)
+			if (shown > 0)
 			{
-				sb.append(", ");
+				sb.append("<br>");
 			}
-			sb.append(itemName(e.getKey())).append(" ×").append(e.getValue());
+			sb.append(itemName(e.getKey())).append(" — ").append(v[0]).append(" fired");
+			if (v[1] > 0)
+			{
+				sb.append(", ").append(v[1]).append(" recovered");
+			}
+			sb.append(", ").append(v[2]).append(" charged");
 			shown++;
 		}
-		return sb.length() == 0 ? null : sb.toString();
+		sb.append("</html>");
+		return shown == 0 ? null : sb.toString();
 	}
 
 	private static final Pattern DOSE_SUFFIX = Pattern.compile("\\(\\d\\)\\s*$");
@@ -1324,12 +1372,6 @@ public class SessionCostTrackerPlugin extends Plugin
 		return sb.toString();
 	}
 
-	private WorldPoint playerLocation()
-	{
-		final Player lp = client.getLocalPlayer();
-		return lp != null ? lp.getWorldLocation() : null;
-	}
-
 	private Map<String, Object> namedItems(Map<Integer, Integer> items)
 	{
 		final Map<String, Object> out = new LinkedHashMap<>();
@@ -1337,14 +1379,21 @@ public class SessionCostTrackerPlugin extends Plugin
 		return out;
 	}
 
-	private Map<String, Object> ammoItemsLog(Map<Integer, Long> units)
+	private Map<String, Object> ammoItemsLog(Map<Integer, long[]> stats)
 	{
-		if (units.isEmpty())
+		if (stats.isEmpty())
 		{
 			return null;
 		}
 		final Map<String, Object> out = new LinkedHashMap<>();
-		units.forEach((id, qty) -> out.put(itemName(id) + " (" + id + ")", qty));
+		stats.forEach((id, v) ->
+		{
+			final Map<String, Object> row = new LinkedHashMap<>();
+			row.put("fired", v[0]);
+			row.put("recovered", v[1]);
+			row.put("charged", v[2]);
+			out.put(itemName(id) + " (" + id + ")", row);
+		});
 		return out;
 	}
 

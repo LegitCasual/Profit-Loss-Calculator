@@ -12,8 +12,8 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * A death, held as a pending ledger entry against the trip that was active at the moment
- * of death. It carries no confirmed cost until it resolves:
+ * A death, held as a pending ledger entry on the session. It carries no confirmed cost
+ * until it resolves:
  *
  * <ul>
  *     <li>items came back for free (gravestone) -&gt; resolved cost 0</li>
@@ -22,8 +22,8 @@ import lombok.Setter;
  *     <li>never reclaimed by session end -&gt; resolved cost = full GE value lost</li>
  * </ul>
  *
- * <p>The entry is created the instant the player dies (so the trip cannot be collapsed
- * before the loss is known) and {@link #setLoss} fills in the diff a few ticks later.
+ * <p>The entry is created the instant the player dies and {@link #setLoss} fills in the
+ * diff a few ticks later.
  */
 @Getter
 class DeathEntry
@@ -39,7 +39,6 @@ class DeathEntry
 	}
 
 	private final int id;
-	private final int tripId;
 	private final Instant deathTime;
 
 	/** itemId -&gt; quantity that was on the player pre-death and gone post-death. */
@@ -63,10 +62,9 @@ class DeathEntry
 	@Setter
 	private boolean userConfirmed;
 
-	DeathEntry(int id, int tripId, Instant deathTime, Map<Integer, Integer> lostItems, long fullValue)
+	DeathEntry(int id, Instant deathTime, Map<Integer, Integer> lostItems, long fullValue)
 	{
 		this.id = id;
-		this.tripId = tripId;
 		this.deathTime = deathTime;
 		this.lostItems = Collections.unmodifiableMap(new LinkedHashMap<>(lostItems));
 		this.fullValue = fullValue;

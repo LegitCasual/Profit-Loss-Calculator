@@ -7,22 +7,19 @@ package com.sessioncosttracker;
 import java.time.Instant;
 import java.util.Collections;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class SessionSummaryTest
 {
-	private static Trip tripWithConsumable(Session s, long gp)
+	private static CostEvent event(CostEvent.Type type, long gp)
 	{
-		Trip t = new Trip(s.nextTripId(), Instant.now());
-		t.add(new CostEvent(CostEvent.Type.CONSUMABLE, Instant.now(), t.getId(), 385, 1, gp, "Shark", null));
-		return t;
+		return new CostEvent(type, Instant.now(), 385, 1, gp, "x", null);
 	}
 
-	private static DeathEntry death(Session s, int tripId, DeathEntry.State state, long full, long resolved, boolean confirmed)
+	private static DeathEntry death(Session s, DeathEntry.State state, long full, long resolved, boolean confirmed)
 	{
-		DeathEntry d = new DeathEntry(s.nextDeathId(), tripId, Instant.now(), Collections.emptyMap(), 0);
+		DeathEntry d = new DeathEntry(s.nextDeathId(), Instant.now(), Collections.emptyMap(), 0);
 		d.setLoss(Collections.singletonMap(4151, 1), full);
 		d.setState(state);
 		d.setResolvedCost(resolved);
@@ -31,52 +28,43 @@ public class SessionSummaryTest
 	}
 
 	@Test
-	public void summaryRollsUpTripsConfirmedAndAtRisk()
+	public void rollsUpCategoriesConfirmedAndAtRisk()
 	{
 		Session s = new Session(Instant.now());
-
-		Trip t1 = tripWithConsumable(s, 5_000);
-		s.getTrips().add(t1);
-
-		Trip t2 = new Trip(s.nextTripId(), Instant.now());
-		t2.add(death(s, t2.getId(), DeathEntry.State.LOST, 2_000_000, 2_000_000, true));
-		s.getTrips().add(t2);
-
-		Trip t3 = new Trip(s.nextTripId(), Instant.now());
-		t3.add(death(s, t3.getId(), DeathEntry.State.PENDING, 20_000, 0, false));
-		s.getTrips().add(t3);
-
-		s.setCollapsedEmptyTrips(2);
+		s.add(event(CostEvent.Type.CONSUMABLE, 5_000));
+		s.add(event(CostEvent.Type.SPELL, 1_200));
+		s.add(event(CostEvent.Type.TELEPORT, 300));
+		s.setAmmo(Collections.emptyMap(), 800);
+		s.add(death(s, DeathEntry.State.LOST, 2_000_000, 2_000_000, true));
+		s.add(death(s, DeathEntry.State.PENDING, 20_000, 0, false));
+		s.addBossKill();
+		s.addBossKill();
 
 		SessionSummary summary = SessionSummary.of(s);
 
-		assertEquals(3, summary.getTrips().size());
-		assertEquals(5_000, summary.getTrips().get(0).getConsumables());
-		assertEquals(2_000_000, summary.getTrips().get(1).getDeathConfirmed());
-		assertEquals(20_000, summary.getTrips().get(2).getDeathAtRisk());
-		assertEquals(0, summary.getTrips().get(2).getDeathConfirmed());
-
-		assertEquals(2_005_000, summary.getSessionTotal());
+		assertEquals(5_000, summary.getConsumables());
+		assertEquals(1_200, summary.getSpells());
+		assertEquals(300, summary.getTeleports());
+		assertEquals(800, summary.getAmmo());
+		assertEquals(2_000_000, summary.getDeathConfirmed());
 		assertEquals(20_000, summary.getAtRisk());
-		assertEquals(2, summary.getCollapsedEmptyTrips());
+		assertEquals(2, summary.getBossKills());
+		assertEquals(2_007_300, summary.total());
 
-		assertNotNull(summary.toJsonFields().get("trips"));
+		assertEquals(2_007_300L, summary.toJsonFields().get("total"));
 		assertTrue(summary.toPlainText().contains("Session total"));
+		assertTrue(summary.toPlainText().contains("Boss kills"));
 	}
 
 	@Test
 	public void confirmedFeeCountsGravestoneZeroDoesNot()
 	{
 		Session s = new Session(Instant.now());
-		Trip t = new Trip(s.nextTripId(), Instant.now());
-		// returned + confirmed at a 1k fee -> counts 1000
-		t.add(death(s, t.getId(), DeathEntry.State.RETURNED, 500_000, 1_000, true));
-		// returned via gravestone -> confirmed at 0 -> counts 0, not at risk
-		t.add(death(s, t.getId(), DeathEntry.State.RETURNED, 800_000, 0, true));
-		s.getTrips().add(t);
+		s.add(death(s, DeathEntry.State.RETURNED, 500_000, 1_000, true));   // confirmed 1k fee
+		s.add(death(s, DeathEntry.State.RETURNED, 800_000, 0, true));       // gravestone, 0
 
 		SessionSummary summary = SessionSummary.of(s);
-		assertEquals(1_000, summary.getSessionTotal());
+		assertEquals(1_000, summary.total());
 		assertEquals(0, summary.getAtRisk());
 	}
 }

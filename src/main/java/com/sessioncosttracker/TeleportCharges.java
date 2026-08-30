@@ -5,6 +5,7 @@
 package com.sessioncosttracker;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -63,6 +64,12 @@ final class TeleportCharges
 		final Set<Integer> all = new HashSet<>();
 		GROUPS.values().forEach(all::addAll);
 		return all;
+	}
+
+	/** base item id -&gt; the variant ids in that group. */
+	static Map<Integer, Set<Integer>> groups()
+	{
+		return Collections.unmodifiableMap(GROUPS);
 	}
 
 	@Value

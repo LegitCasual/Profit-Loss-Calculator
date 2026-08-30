@@ -27,7 +27,6 @@ class CostEvent
 
 	Type type;
 	Instant time;
-	int tripId;
 
 	/** Item consumed (CONSUMABLE/TELEPORT), or -1 for SPELL. */
 	int itemId;

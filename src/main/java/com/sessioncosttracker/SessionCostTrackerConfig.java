@@ -8,7 +8,6 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
-import net.runelite.client.config.Range;
 
 @ConfigGroup(SessionCostTrackerConfig.GROUP)
 public interface SessionCostTrackerConfig extends Config
@@ -16,31 +15,35 @@ public interface SessionCostTrackerConfig extends Config
 	String GROUP = "sessioncosttracker";
 
 	@ConfigSection(
-		name = "Trips",
-		description = "How trips are cut",
-		position = 0
-	)
-	String tripsSection = "trips";
-
-	@ConfigSection(
 		name = "Death cost",
 		description = "How the Death's Office reclaim fee is estimated",
-		position = 1
+		position = 0
 	)
 	String deathSection = "death";
 
 	@ConfigSection(
 		name = "Ammo & teleports",
 		description = "Extra cost sources, all priced live off the GE",
-		position = 2
+		position = 1
 	)
 	String extrasSection = "extras";
 
 	@ConfigItem(
+		keyName = "bossName",
+		name = "Boss name",
+		description = "When set, killing an NPC whose name contains this bumps the session's kill tally automatically. Also editable from the side panel.",
+		position = 0
+	)
+	default String bossName()
+	{
+		return "";
+	}
+
+	@ConfigItem(
 		keyName = "showOverlay",
 		name = "In-game overlay",
-		description = "Show the current trip cost and session total as an overlay while a session is running",
-		position = 0
+		description = "Show the running session total (and kill tally) as an overlay while a session is running",
+		position = 1
 	)
 	default boolean showOverlay()
 	{
@@ -51,7 +54,7 @@ public interface SessionCostTrackerConfig extends Config
 		keyName = "potionDoseAware",
 		name = "Dose-aware potion cost",
 		description = "Charge a dosed potion's GE price divided by its dose count per sip, instead of the full price",
-		position = 1
+		position = 2
 	)
 	default boolean potionDoseAware()
 	{
@@ -62,24 +65,11 @@ public interface SessionCostTrackerConfig extends Config
 		keyName = "writeSessionFile",
 		name = "Write session log file",
 		description = "Append every event to a JSON Lines file under .runelite/session-cost-tracker/",
-		position = 2
+		position = 3
 	)
 	default boolean writeSessionFile()
 	{
 		return true;
-	}
-
-	@Range(min = 1, max = 64)
-	@ConfigItem(
-		keyName = "tripDebounceTiles",
-		name = "Trip debounce distance",
-		description = "The player must get at least this far from the last bank/GE before a new bank/GE visit cuts a fresh trip",
-		section = tripsSection,
-		position = 0
-	)
-	default int tripDebounceTiles()
-	{
-		return 12;
 	}
 
 	@ConfigItem(

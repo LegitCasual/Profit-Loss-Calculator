@@ -6,15 +6,15 @@ package com.sessioncosttracker;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.Map;
 import lombok.Getter;
 import lombok.Setter;
 
 /**
- * One Start-to-Stop play session. Holds the kept (non-empty) trips plus the trip that is
- * currently open, and hands out monotonic ids for trips and deaths.
+ * One Start-to-Stop run. Holds every cost event, every death, the ammo tally and the boss
+ * kill count. Can be paused - while paused the plugin stops accruing costs to it.
  */
 @Getter
 class Session
@@ -24,16 +24,18 @@ class Session
 	@Setter
 	private Instant endTime;
 
-	/** Closed, non-empty trips in order. */
-	private final List<Trip> trips = new ArrayList<>();
-
 	@Setter
-	private Trip currentTrip;
+	private boolean paused;
 
-	@Setter
-	private int collapsedEmptyTrips;
+	private int bossKills;
 
-	private int tripSeq;
+	private final List<CostEvent> events = new ArrayList<>();
+	private final List<DeathEntry> deaths = new ArrayList<>();
+
+	/** Ammo used this session: item id -&gt; {fired, recovered, net}. */
+	private Map<Integer, long[]> ammoStats = new LinkedHashMap<>();
+	private long ammoGp;
+
 	private int deathSeq;
 
 	Session(Instant startTime)
@@ -41,42 +43,79 @@ class Session
 		this.startTime = startTime;
 	}
 
-	int nextTripId()
-	{
-		return ++tripSeq;
-	}
-
 	int nextDeathId()
 	{
 		return ++deathSeq;
 	}
 
-	/** Kept trips plus the open one (if any). */
-	List<Trip> allTrips()
+	void add(CostEvent event)
 	{
-		return Stream.concat(trips.stream(), currentTrip == null ? Stream.empty() : Stream.of(currentTrip))
-			.collect(Collectors.toList());
+		events.add(event);
 	}
 
-	List<DeathEntry> allDeaths()
+	void add(DeathEntry death)
 	{
-		return allTrips().stream()
-			.flatMap(t -> t.getDeaths().stream())
-			.collect(Collectors.toList());
+		deaths.add(death);
 	}
 
-	Trip tripById(int id)
+	void addBossKill()
 	{
-		return allTrips().stream().filter(t -> t.getId() == id).findFirst().orElse(null);
+		bossKills++;
 	}
 
-	long confirmedTotal()
+	/** Replace the ammo tally (the tracker hands back a fresh running total each time). */
+	void setAmmo(Map<Integer, long[]> stats, long gp)
 	{
-		return allTrips().stream().mapToLong(Trip::total).sum();
+		this.ammoStats = stats;
+		this.ammoGp = gp;
 	}
 
+	long consumableTotal()
+	{
+		return typeTotal(CostEvent.Type.CONSUMABLE);
+	}
+
+	long spellTotal()
+	{
+		return typeTotal(CostEvent.Type.SPELL);
+	}
+
+	long teleportTotal()
+	{
+		return typeTotal(CostEvent.Type.TELEPORT);
+	}
+
+	private long typeTotal(CostEvent.Type type)
+	{
+		return events.stream()
+			.filter(e -> e.getType() == type)
+			.mapToLong(CostEvent::getGp)
+			.sum();
+	}
+
+	/** Never negative - picking your own ammo back up can briefly push the tally down. */
+	long ammoTotal()
+	{
+		return Math.max(0, ammoGp);
+	}
+
+	/** Death cost that has resolved and been confirmed (or locked in as a full loss). */
+	long confirmedDeathTotal()
+	{
+		return deaths.stream()
+			.filter(DeathEntry::isCounted)
+			.mapToLong(DeathEntry::getResolvedCost)
+			.sum();
+	}
+
+	/** Value of deaths still waiting on resolution/confirmation. */
 	long atRiskTotal()
 	{
-		return allTrips().stream().mapToLong(Trip::atRiskTotal).sum();
+		return deaths.stream().mapToLong(DeathEntry::atRiskValue).sum();
+	}
+
+	long total()
+	{
+		return consumableTotal() + spellTotal() + teleportTotal() + ammoTotal() + confirmedDeathTotal();
 	}
 }
