@@ -1,0 +1,16 @@
+.gradle
+build
+bin/
+.idea/
+.vscode/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+
+# Agent guidance - kept local, not part of the published plugin
+AGENTS.md
+CLAUDE.md
+.claude/
