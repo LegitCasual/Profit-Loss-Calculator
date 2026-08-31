@@ -8,6 +8,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Range;
 
 @ConfigGroup(SessionCostTrackerConfig.GROUP)
 public interface SessionCostTrackerConfig extends Config
@@ -28,6 +29,13 @@ public interface SessionCostTrackerConfig extends Config
 	)
 	String extrasSection = "extras";
 
+	@ConfigSection(
+		name = "Income",
+		description = "What counts as gp coming in, and how it is valued",
+		position = 2
+	)
+	String incomeSection = "income";
+
 	@ConfigItem(
 		keyName = "bossName",
 		name = "Boss name",
@@ -46,6 +54,28 @@ public interface SessionCostTrackerConfig extends Config
 		position = 1
 	)
 	default boolean showOverlay()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showIncomeList",
+		name = "Show income list",
+		description = "Also show a flat time-ordered list of every loot / pickup below the summary and kill log.",
+		position = 4
+	)
+	default boolean showIncomeList()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showCostList",
+		name = "Show cost list",
+		description = "Also show a flat time-ordered list of every consumable / spell / teleport / ammo cost.",
+		position = 5
+	)
+	default boolean showCostList()
 	{
 		return false;
 	}
@@ -106,5 +136,66 @@ public interface SessionCostTrackerConfig extends Config
 	default boolean trackTeleports()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "trackLoot",
+		name = "Track loot",
+		description = "Count monster drops, PvP kills, reward chests and pickpockets as income. Needs RuneLite's built-in Loot Tracker plugin enabled (it is by default).",
+		section = incomeSection,
+		position = 0
+	)
+	default boolean trackLoot()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "trackPickups",
+		name = "Track ground pickups",
+		description = "Count items you take off the ground (or telegrab) that aren't already credited to one of your kills. Picking your own dropped junk back up will count.",
+		section = incomeSection,
+		position = 1
+	)
+	default boolean trackPickups()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "countUncollectedDrops",
+		name = "Count uncollected drops",
+		description = "Count the full value of everything that dropped toward profit, even loot left on the ground. Off = only loot you actually picked up counts; the rest shows as 'potential'.",
+		section = incomeSection,
+		position = 2
+	)
+	default boolean countUncollectedDrops()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "incomeValuation",
+		name = "Value loot at",
+		description = "GE price, High Alchemy value, or whichever is higher. Coins are always face value. Cost is always GE priced.",
+		section = incomeSection,
+		position = 3
+	)
+	default IncomeValuation.Mode incomeValuation()
+	{
+		return IncomeValuation.Mode.GE;
+	}
+
+	@Range(min = 0)
+	@ConfigItem(
+		keyName = "ignoreIncomeBelow",
+		name = "Hide loot under (gp)",
+		description = "Drops worth less than this are left out of the income list and the totals. 0 shows everything.",
+		section = incomeSection,
+		position = 4
+	)
+	default int ignoreIncomeBelow()
+	{
+		return 0;
 	}
 }

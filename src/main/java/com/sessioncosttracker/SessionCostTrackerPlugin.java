@@ -16,9 +16,11 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
@@ -52,8 +54,12 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
+import net.runelite.client.game.ItemVariationMapping;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
@@ -64,8 +70,8 @@ import net.runelite.client.util.Text;
 @Slf4j
 @PluginDescriptor(
 	name = "Session Cost Tracker",
-	description = "Tracks the gp a play session costs - supplies, spells, teleports, ammo and deaths - with a boss kill tally and a JSON log",
-	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death"}
+	description = "Profit / loss for a play session - loot and pickups in, supplies / spells / teleports / ammo / deaths out - with a boss kill tally and a JSON log",
+	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income"}
 )
 public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrackerPanel.Controls
 {
@@ -94,6 +100,9 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 
 	/** Ignore a second boss "death" within this many ticks - multi-part bosses (Olm, Hydra). */
 	private static final int BOSS_KILL_DEBOUNCE_TICKS = 8;
+
+	/** A matching loot event this many ticks after a kill is still that kill's loot. */
+	private static final int LOOT_ATTRIBUTION_TICKS = 25;
 
 	private static final int AMMO_SLOT = EquipmentInventorySlot.AMMO.getSlotIdx();
 	private static final int WEAPON_SLOT = EquipmentInventorySlot.WEAPON.getSlotIdx();
@@ -175,6 +184,35 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 	/** tick the tracked boss last died - debounces multi-part boss deaths */
 	private int lastBossKillTick = -100;
 
+	// income tracking
+	/** decides how much of each drop actually reached the bag ("collected") vs stayed on
+	 *  the floor ("potential") */
+	private final LootCollector lootCollector = new LootCollector();
+	/** correlates a "Take" click with the inventory gain that follows it (orphan ground
+	 *  items - spawns, telegrabs, other players' drops - with no loot event of their own) */
+	private final PickupTracker pickupTracker = new PickupTracker();
+	private final IncomeValuation.PriceLookup priceLookup = new IncomeValuation.PriceLookup()
+	{
+		@Override
+		public int ge(int itemId)
+		{
+			return itemManager.getItemPrice(itemId);
+		}
+
+		@Override
+		public int ha(int itemId)
+		{
+			try
+			{
+				return itemManager.getItemComposition(itemId).getHaPrice();
+			}
+			catch (RuntimeException ex)
+			{
+				return 0;
+			}
+		}
+	};
+
 	// pending death tracking
 	private Map<Integer, Integer> preDeathState = Collections.emptyMap();
 	private DeathEntry pendingDeath;
@@ -192,9 +230,7 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 
 	private final Map<Integer, DeathEntry> pendings = new LinkedHashMap<>();
 
-	private volatile SessionCostTrackerPanel.View currentView =
-		new SessionCostTrackerPanel.View(false, false, false, 0, 0, "", 0,
-			Collections.emptyList(), Collections.emptyList());
+	private volatile SessionCostTrackerPanel.View currentView = SessionCostTrackerPanel.View.builder().build();
 
 	@Provides
 	SessionCostTrackerConfig provideConfig(ConfigManager configManager)
@@ -205,7 +241,7 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 	@Override
 	protected void startUp()
 	{
-		panel = new SessionCostTrackerPanel(this);
+		panel = new SessionCostTrackerPanel(this, itemManager);
 
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "panel_icon.png");
 		navButton = NavigationButton.builder()
@@ -287,7 +323,9 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 			{
 				return;
 			}
-			session.addBossKill();
+			final String name = config.bossName().trim().isEmpty() ? "Kill" : config.bossName().trim();
+			session.addBossKill(name);
+			lastBossKillTick = client.getTickCount();
 			logger.line("boss_kill").put("source", "manual").put("count", session.getBossKills()).submit();
 			refreshView();
 		});
@@ -341,6 +379,8 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 			teleCostPerCharge = buildTelePerChargeCost();
 		}
 		ammoTracker.reset(ammoOwned());
+		pickupTracker.reset();
+		lootCollector.clear();
 
 		if (config.writeSessionFile())
 		{
@@ -365,6 +405,7 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		session.setPaused(paused);
 		// re-base the trackers past the paused stretch so banking / afk doesn't accrue
 		ammoTracker.reset(ammoOwned());
+		pickupTracker.reset();
 		prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
 		logger.line(paused ? "session_pause" : "session_resume").submit();
 		refreshView();
@@ -407,26 +448,38 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		session.setEndTime(Instant.now());
 		sessionFinished = true;
 
-		final SessionSummary summary = SessionSummary.of(session);
+		final long collected = collectedTotal();
+		final long potential = potentialTotal();
+		final SessionSummary summary = SessionSummary.of(session, collected, potential);
 		logger.line("session_stop")
 			.put("durationSeconds", java.time.Duration.between(session.getStartTime(), session.getEndTime()).getSeconds())
+			.put("valuation", config.incomeValuation().name())
 			.put("summary", summary.toJsonFields())
 			.put("ammoItems", ammoItemsLog(session.getAmmoStats()))
+			.put("kills", killsLog())
 			.submit();
 		final Path file = logger.path();
 		logger.close();
 
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
-			final StringBuilder msg = new StringBuilder("[Session Cost Tracker] Session total: ")
-				.append(gp(session.total()));
+			final long net = summary.net();
+			final StringBuilder msg = new StringBuilder("[Session Cost Tracker] ")
+				.append(net >= 0 ? "Profit: " : "Loss: ")
+				.append(gp(Math.abs(net)))
+				.append("  (collected ").append(gp(collected))
+				.append(" − cost ").append(gp(session.total())).append(')');
+			if (potential != collected)
+			{
+				msg.append(", ").append(gp(potential)).append(" dropped");
+			}
 			if (session.getBossKills() > 0)
 			{
 				msg.append(" over ").append(session.getBossKills()).append(" kill(s)");
 			}
 			if (session.atRiskTotal() > 0)
 			{
-				msg.append(" (+").append(gp(session.atRiskTotal())).append(" at risk)");
+				msg.append(" (").append(gp(session.atRiskTotal())).append(" at risk)");
 			}
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", msg.toString(), null);
 		}
@@ -544,15 +597,25 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		updateBankState();
 		pushStateHistory();
 
-		// teleport charge drops are read once per tick so equipping / unequipping jewellery
-		// (item moves inv<->worn within a tick, net zero) never looks like a teleport.
-		// Skip while banking / paused - a deposit would look like spending the last charge.
+		// teleport charge drops and ground pickups are read once per tick so equipping /
+		// unequipping jewellery (item moves inv<->worn within a tick, net zero) never looks
+		// like a teleport. Skip while banking / paused - a deposit would look like spending
+		// the last charge, a withdrawal like a pickup.
 		final Map<Integer, Integer> curItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
-		if (deathWindowTicks == 0 && !bankOpen && !session.isPaused() && !prevTickItems.isEmpty())
+		if (deathWindowTicks == 0 && !bankOpen && !session.isPaused())
 		{
-			detectTeleports(prevTickItems, curItems);
+			if (!prevTickItems.isEmpty())
+			{
+				detectTeleports(prevTickItems, curItems);
+			}
+			final Map<Integer, Integer> gains = ContainerSnapshot.lost(curItems, prevTickItems);
+			if (!gains.isEmpty())
+			{
+				reconcileIncome(gains);
+			}
 		}
 		prevTickItems = curItems;
+		lootCollector.expire(client.getTickCount());
 
 		if (deathWindowTicks > 0)
 		{
@@ -650,6 +713,7 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		if (!nowBank)
 		{
 			ammoTracker.reset(ammoOwned());
+			pickupTracker.reset();
 			prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
 		}
 	}
@@ -661,6 +725,8 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		{
 			return;
 		}
+		maybeIntendPickup(event);
+
 		final String option = event.getMenuOption();
 		if ("Eat".equals(option) || "Drink".equals(option))
 		{
@@ -668,6 +734,28 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 			return;
 		}
 		handleSpell(event);
+	}
+
+	/** A ground item was clicked to be taken (or telekinetic-grabbed) - arm the pickup
+	 *  tracker so the inventory gain that follows is credited as income. */
+	private void maybeIntendPickup(MenuOptionClicked event)
+	{
+		if (!config.trackPickups())
+		{
+			return;
+		}
+		final MenuAction ma = event.getMenuAction();
+		if (ma == null)
+		{
+			return;
+		}
+		final boolean take = "Take".equals(event.getMenuOption())
+			&& ma.getId() >= MenuAction.GROUND_ITEM_FIRST_OPTION.getId()
+			&& ma.getId() <= MenuAction.GROUND_ITEM_FIFTH_OPTION.getId();
+		if (take || ma == MenuAction.WIDGET_TARGET_ON_GROUND_ITEM)
+		{
+			pickupTracker.intend(event.getId(), client.getTickCount());
+		}
 	}
 
 	@Subscribe
@@ -704,16 +792,19 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		refreshView();
 	}
 
-	/** A tracked boss died: bump the session kill tally. */
-	private void handleBossKill(NPC npc)
+	/** True if {@code candidate} matches the configured boss name (case-insensitive contains). */
+	private boolean bossNameMatches(String candidate)
 	{
 		final String boss = config.bossName().trim();
-		if (boss.isEmpty())
-		{
-			return;
-		}
+		return !boss.isEmpty() && candidate != null
+			&& candidate.toLowerCase().contains(boss.toLowerCase());
+	}
+
+	/** A tracked boss died: open a new kill bucket for its loot. */
+	private void handleBossKill(NPC npc)
+	{
 		final String name = npc.getName();
-		if (name == null || !name.toLowerCase().contains(boss.toLowerCase()))
+		if (!bossNameMatches(name))
 		{
 			return;
 		}
@@ -724,13 +815,194 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		}
 		lastBossKillTick = tick;
 
-		session.addBossKill();
+		session.addBossKill(name);
 		logger.line("boss_kill")
 			.put("source", "auto")
 			.put("boss", name)
 			.put("count", session.getBossKills())
 			.submit();
 		refreshView();
+	}
+
+	// ------------------------------------------------------------------ income
+
+	/**
+	 * All loot RuneLite's loot tracker recognises - monster and boss kills, PvP kills,
+	 * reward chests / caskets / minigame rewards, and pickpockets - arrives here already
+	 * deduplicated. Needs the built-in Loot Tracker plugin enabled.
+	 */
+	@Subscribe
+	public void onLootReceived(LootReceived event)
+	{
+		if (!accruing() || !config.trackLoot())
+		{
+			return;
+		}
+		final IncomeEvent.Type type = incomeType(event.getType());
+		if (type == null)
+		{
+			return;
+		}
+
+		final Map<Integer, Integer> items = new LinkedHashMap<>();
+		for (ItemStack is : event.getItems())
+		{
+			if (is.getId() > 0 && is.getQuantity() > 0)
+			{
+				items.merge(is.getId(), is.getQuantity(), Integer::sum);
+			}
+		}
+		if (items.isEmpty())
+		{
+			return;
+		}
+
+		final String source = event.getName() == null || event.getName().isEmpty()
+			? "Loot" : event.getName();
+		final IncomeEvent ie = new IncomeEvent(type, Instant.now(), source, items);
+		session.add(ie);
+		// monster / PvP loot lands on the ground - watch for it entering the bag before it
+		// counts toward net. Rewards and pickpockets go straight to the inventory (the
+		// IncomeEvent marks itself fully collected).
+		if (type == IncomeEvent.Type.NPC_LOOT || type == IncomeEvent.Type.PLAYER_LOOT)
+		{
+			lootCollector.add(ie, client.getTickCount());
+		}
+
+		// attribute a boss's loot to the kill it came from
+		final BossKill kill = session.lastKill();
+		final boolean toKill = type == IncomeEvent.Type.NPC_LOOT
+			&& kill != null
+			&& client.getTickCount() - lastBossKillTick <= LOOT_ATTRIBUTION_TICKS
+			&& bossNameMatches(source);
+		if (toKill)
+		{
+			kill.add(ie);
+		}
+
+		logger.line("loot")
+			.put("kind", type.name())
+			.put("source", source)
+			.put("kill", toKill ? kill.getIndex() : null)
+			.put("items", namedItems(items))
+			.put("droppedGp", lootValue(items))
+			.put("valuation", config.incomeValuation().name())
+			.submit();
+		refreshView();
+	}
+
+	private static IncomeEvent.Type incomeType(LootRecordType t)
+	{
+		if (t == null)
+		{
+			return null;
+		}
+		switch (t)
+		{
+			case NPC:
+				return IncomeEvent.Type.NPC_LOOT;
+			case PLAYER:
+				return IncomeEvent.Type.PLAYER_LOOT;
+			case EVENT:
+				return IncomeEvent.Type.EVENT_LOOT;
+			case PICKPOCKET:
+				return IncomeEvent.Type.PICKPOCKET;
+			default:
+				return null;
+		}
+	}
+
+	/**
+	 * A tick's inventory gains, in order of preference: first as collected loot for a drop
+	 * we're already watching, then - if the player clicked Take - as an orphan ground
+	 * pickup (or a late collect of an older drop).
+	 */
+	private void reconcileIncome(Map<Integer, Integer> gains)
+	{
+		if (session == null)
+		{
+			return;
+		}
+		final int tick = client.getTickCount();
+		boolean changed = lootCollector.correlate(gains, tick);
+
+		if (config.trackPickups() && !gains.isEmpty())
+		{
+			final Set<Integer> excluded = new HashSet<>(ammoTracker.tracked());
+			excluded.addAll(session.getAmmoStats().keySet());
+			final Map<Integer, Integer> picked = pickupTracker.collect(gains, tick, excluded);
+			if (!picked.isEmpty())
+			{
+				// a deliberate Take of something that dropped a while ago belongs to that drop
+				changed |= lootCollector.collectViaClick(picked);
+				if (!picked.isEmpty())
+				{
+					final IncomeEvent ie = new IncomeEvent(IncomeEvent.Type.PICKUP, Instant.now(), "Ground", picked);
+					session.add(ie);
+					logger.line("loot")
+						.put("kind", "PICKUP")
+						.put("source", "Ground")
+						.put("items", namedItems(picked))
+						.put("droppedGp", lootValue(picked))
+						.put("valuation", config.incomeValuation().name())
+						.submit();
+					changed = true;
+				}
+			}
+		}
+
+		if (changed)
+		{
+			viewDirty = true;
+		}
+	}
+
+	private long lootValue(Map<Integer, Integer> items)
+	{
+		return IncomeValuation.value(items, config.incomeValuation(), priceLookup);
+	}
+
+	private long lootValue(int itemId, int qty)
+	{
+		return IncomeValuation.value(itemId, qty, config.incomeValuation(), priceLookup);
+	}
+
+	/** The map that counts toward profit for this event - normally what was collected, or
+	 *  everything that dropped when {@code countUncollectedDrops} is on. */
+	private Map<Integer, Integer> countedItems(IncomeEvent e)
+	{
+		return config.countUncollectedDrops() ? e.getItems() : e.getCollected();
+	}
+
+	/** Value that actually counts toward net, after the hide-below-N filter. */
+	private long collectedTotal()
+	{
+		return incomeTotal(this::countedItems);
+	}
+
+	/** Value of everything that dropped (collected or not), after the hide filter. */
+	private long potentialTotal()
+	{
+		return incomeTotal(IncomeEvent::getItems);
+	}
+
+	private long incomeTotal(java.util.function.Function<IncomeEvent, Map<Integer, Integer>> map)
+	{
+		if (session == null)
+		{
+			return 0L;
+		}
+		final long floor = Math.max(0, config.ignoreIncomeBelow());
+		long total = 0L;
+		for (IncomeEvent e : session.getIncome())
+		{
+			if (lootValue(e.getItems()) < floor)
+			{
+				continue;
+			}
+			total += lootValue(map.apply(e));
+		}
+		return total;
 	}
 
 	/** Records, per item, the largest shortfall vs the pre-death kit seen so far. Runs on
@@ -1193,6 +1465,9 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 		final SpellCostService.Priced priced = spellCostService.price(spell);
 		session.add(new CostEvent(CostEvent.Type.SPELL, Instant.now(),
 			-1, 1, priced.getGp(), spell.getDisplayName(), priced.getBreakdown()));
+		final Map<Integer, Integer> runeIds = new HashMap<>();
+		priced.getRunesUsed().forEach((r, q) -> runeIds.merge(r.getItemId(), q, Integer::sum));
+		session.addRunes(runeIds);
 		logger.line("spell_cast")
 			.put("spell", spell.getDisplayName())
 			.put("gp", priced.getGp())
@@ -1216,6 +1491,10 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 	private void refreshView()
 	{
 		final SessionCostTrackerPanel.View view = buildView();
+		if (view.equals(currentView))
+		{
+			return;
+		}
 		currentView = view;
 		final SessionCostTrackerPanel p = panel;
 		if (p != null)
@@ -1229,29 +1508,297 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 
 	private SessionCostTrackerPanel.View buildView()
 	{
+		final SessionCostTrackerPanel.View.ViewBuilder b = SessionCostTrackerPanel.View.builder()
+			.bossName(config.bossName())
+			.showIncomeList(config.showIncomeList())
+			.showCostList(config.showCostList());
+
 		if (session == null)
 		{
-			return new SessionCostTrackerPanel.View(false, false, false, 0, 0,
-				config.bossName(), 0, Collections.emptyList(), Collections.emptyList());
+			return b.build();
 		}
 
-		final List<SessionCostTrackerPanel.DeathRow> deaths = new ArrayList<>();
 		for (DeathEntry e : session.getDeaths())
 		{
 			if (e.getLostItems().isEmpty() || e.isCounted())
 			{
 				continue;
 			}
-			deaths.add(new SessionCostTrackerPanel.DeathRow(e.getId(),
+			b.death(new SessionCostTrackerPanel.DeathRow(e.getId(),
 				namedItemsText(e.getLostItems()), e.getEstimatedFee(), e.getFullValue(),
 				e.getState() != DeathEntry.State.PENDING));
 		}
 
-		return new SessionCostTrackerPanel.View(
-			!sessionFinished, session.isPaused(), sessionFinished,
-			session.total(), session.atRiskTotal(),
-			config.bossName(), session.getBossKills(),
-			eventLines(session), deaths);
+		// income events already shown under a kill are left out of the flat list
+		final Set<IncomeEvent> inKill = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		Instant prev = session.getStartTime();
+		for (BossKill k : session.getKills())
+		{
+			for (IncomeEvent e : k.getDrops())
+			{
+				inKill.add(e);
+			}
+			b.killRow(killRow(k, prev));
+			prev = k.getTime();
+		}
+
+		final long collected = collectedTotal();
+		final long potential = potentialTotal();
+		final long cost = session.total();
+		final long net = collected - cost;
+		final long secs = java.time.Duration.between(session.getStartTime(),
+			session.getEndTime() != null ? session.getEndTime() : Instant.now()).getSeconds();
+
+		b.gainItems(gainGridItems());
+		b.lossItems(lossGridItems());
+		b.incomeEvents(incomeLines(session, inKill));
+		b.costEvents(eventLines(session));
+
+		return b
+			.active(!sessionFinished)
+			.paused(session.isPaused())
+			.finished(sessionFinished)
+			.state(sessionFinished ? "stopped" : session.isPaused() ? "paused" : "running")
+			.title(config.bossName().trim().isEmpty() ? "Session" : config.bossName().trim())
+			.kills(session.getBossKills())
+			.elapsedSeconds(secs)
+			.gains(collected)
+			.losses(cost)
+			.net(net)
+			.netPerHour(secs > 60 ? net * 3600 / secs : 0)
+			.potential(potential)
+			.atRisk(session.atRiskTotal())
+			.build();
+	}
+
+	/** Green grid: everything collected this session, valued the way loot is, sorted by value. */
+	private List<SessionCostTrackerPanel.GridItem> gainGridItems()
+	{
+		final boolean full = config.countUncollectedDrops();
+		final Map<Integer, Integer> qty = new LinkedHashMap<>();
+		for (IncomeEvent e : session.getIncome())
+		{
+			(full ? e.getItems() : e.getCollected()).forEach((id, q) -> qty.merge(id, q, Integer::sum));
+		}
+		return gridItems(qty, this::lootValue);
+	}
+
+	/** Red grid: everything consumed - supplies, teleports, ammo, runes - always GE priced. */
+	private List<SessionCostTrackerPanel.GridItem> lossGridItems()
+	{
+		final Map<Integer, Integer> qty = new LinkedHashMap<>();
+		for (CostEvent e : session.getEvents())
+		{
+			if (e.getType() == CostEvent.Type.CONSUMABLE || e.getType() == CostEvent.Type.TELEPORT)
+			{
+				qty.merge(ItemVariationMapping.map(e.getItemId()), e.getQuantity(), Integer::sum);
+			}
+		}
+		session.getRunesUsed().forEach((id, q) -> qty.merge(id, q, Integer::sum));
+		if (session.ammoTotal() > 0)
+		{
+			session.getAmmoStats().forEach((id, v) ->
+			{
+				if (v[2] > 0)
+				{
+					qty.merge(id, (int) v[2], Integer::sum);
+				}
+			});
+		}
+		return gridItems(qty, (id, q) ->
+			IncomeValuation.value(id, q, IncomeValuation.Mode.GE, priceLookup));
+	}
+
+	private interface ItemPricer
+	{
+		long value(int id, int qty);
+	}
+
+	private List<SessionCostTrackerPanel.GridItem> gridItems(Map<Integer, Integer> qty, ItemPricer pricer)
+	{
+		final List<SessionCostTrackerPanel.GridItem> out = new ArrayList<>();
+		qty.forEach((id, q) ->
+		{
+			if (q > 0)
+			{
+				out.add(new SessionCostTrackerPanel.GridItem(
+					id, q, pricer.value(id, q), itemName(id)));
+			}
+		});
+		out.sort(Comparator.comparingLong(SessionCostTrackerPanel.GridItem::getValue).reversed());
+		return out;
+	}
+
+	/** One kill-log row: net for the fight, with a tooltip of that fight's drops and spend. */
+	private SessionCostTrackerPanel.KillRow killRow(BossKill k, Instant fightStart)
+	{
+		final boolean full = config.countUncollectedDrops();
+
+		long gains = 0;
+		final StringBuilder drops = new StringBuilder();
+		for (IncomeEvent e : k.getDrops())
+		{
+			gains += lootValue(full ? e.getItems() : e.getCollected());
+			e.getItems().forEach((id, q) ->
+			{
+				final int got = full ? q : e.getCollected().getOrDefault(id, 0);
+				drops.append("<br>&nbsp;").append(q).append("× ").append(itemName(id));
+				if (!full && got < q)
+				{
+					drops.append(" (").append(got).append(" kept)");
+				}
+			});
+		}
+
+		long spend = 0;
+		int casts = 0;
+		int sips = 0;
+		int teles = 0;
+		for (CostEvent e : session.getEvents())
+		{
+			if (e.getTime().isAfter(fightStart) && !e.getTime().isAfter(k.getTime()))
+			{
+				spend += e.getGp();
+				switch (e.getType())
+				{
+					case SPELL:
+						casts++;
+						break;
+					case TELEPORT:
+						teles++;
+						break;
+					default:
+						sips++;
+						break;
+				}
+			}
+		}
+		final long fightAmmo = Math.max(0, k.getAmmoGpAtKill() - prevAmmoGp(k));
+		spend += fightAmmo;
+
+		for (DeathEntry d : session.getDeaths())
+		{
+			if (d.isCounted() && d.getDeathTime().isAfter(fightStart)
+				&& !d.getDeathTime().isAfter(k.getTime()))
+			{
+				spend += d.getResolvedCost();
+			}
+		}
+
+		final long net = gains - spend;
+		final StringBuilder tip = new StringBuilder("<html><b>#").append(k.getIndex())
+			.append(' ').append(escapeHtml(k.getName())).append("  ·  ")
+			.append(LINE_TIME.format(k.getTime())).append("</b>");
+		tip.append("<br><br>Dropped").append(drops.length() == 0 ? ": nothing" : drops);
+		tip.append("<br><br>Spent this fight: ").append(gp(spend));
+		final StringBuilder parts = new StringBuilder();
+		if (sips > 0)
+		{
+			parts.append(sips).append(" supplies");
+		}
+		if (casts > 0)
+		{
+			parts.append(parts.length() > 0 ? ", " : "").append(casts).append(" casts");
+		}
+		if (teles > 0)
+		{
+			parts.append(parts.length() > 0 ? ", " : "").append(teles).append(" teleports");
+		}
+		if (fightAmmo > 0)
+		{
+			parts.append(parts.length() > 0 ? ", " : "").append("ammo ").append(gp(fightAmmo));
+		}
+		if (parts.length() > 0)
+		{
+			tip.append("<br>&nbsp;").append(parts);
+		}
+		tip.append("<br><br><b>Net ").append(net >= 0 ? "+" : "").append(gp(net)).append("</b></html>");
+
+		return new SessionCostTrackerPanel.KillRow(
+			k.getIndex(), k.getName(), LINE_TIME.format(k.getTime()), net, tip.toString());
+	}
+
+	/** Ammo-gp total as of the kill before this one (0 for the first kill). */
+	private long prevAmmoGp(BossKill k)
+	{
+		BossKill prev = null;
+		for (BossKill c : session.getKills())
+		{
+			if (c == k)
+			{
+				break;
+			}
+			prev = c;
+		}
+		return prev == null ? 0 : prev.getAmmoGpAtKill();
+	}
+
+	private static String escapeHtml(String s)
+	{
+		return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+	}
+
+	private List<SessionCostTrackerPanel.EventLine> incomeLines(Session s, Set<IncomeEvent> inKill)
+	{
+		final long floor = Math.max(0, config.ignoreIncomeBelow());
+		final List<SessionCostTrackerPanel.EventLine> lines = new ArrayList<>();
+		for (IncomeEvent e : s.getIncome())
+		{
+			if (inKill.contains(e))
+			{
+				continue;
+			}
+			final long dropped = lootValue(e.getItems());
+			if (dropped < floor)
+			{
+				continue;
+			}
+			final long counted = lootValue(countedItems(e));
+			String tip = namedItemsText(e.getItems());
+			if (counted < dropped)
+			{
+				tip = tip + "  —  " + gp(counted) + " of " + gp(dropped) + " collected";
+			}
+			lines.add(new SessionCostTrackerPanel.EventLine(
+				incomeKind(e.getType()),
+				LINE_TIME.format(e.getTime()),
+				counted < dropped ? incomeSourceLabel(e) + " (partial)" : incomeSourceLabel(e),
+				counted,
+				tip));
+		}
+		lines.sort(Comparator.comparing(SessionCostTrackerPanel.EventLine::getTime));
+		return lines;
+	}
+
+	private static String incomeKind(IncomeEvent.Type t)
+	{
+		switch (t)
+		{
+			case NPC_LOOT:
+				return "npc_loot";
+			case PLAYER_LOOT:
+				return "pvp_loot";
+			case EVENT_LOOT:
+				return "event_loot";
+			case PICKPOCKET:
+				return "pickpocket";
+			case PICKUP:
+			default:
+				return "pickup";
+		}
+	}
+
+	private static String incomeSourceLabel(IncomeEvent e)
+	{
+		switch (e.getType())
+		{
+			case PICKUP:
+				return "Picked up";
+			case PLAYER_LOOT:
+				return e.getSource() + " (kill)";
+			default:
+				return e.getSource();
+		}
 	}
 
 	private List<SessionCostTrackerPanel.EventLine> eventLines(Session s)
@@ -1394,6 +1941,37 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 			row.put("charged", v[2]);
 			out.put(itemName(id) + " (" + id + ")", row);
 		});
+		return out;
+	}
+
+	/** Per-kill loot breakdown for the session_stop line. */
+	private List<Map<String, Object>> killsLog()
+	{
+		if (session == null || session.getKills().isEmpty())
+		{
+			return null;
+		}
+		final List<Map<String, Object>> out = new ArrayList<>();
+		for (BossKill k : session.getKills())
+		{
+			long dropped = 0;
+			long collected = 0;
+			final Map<Integer, Integer> items = new LinkedHashMap<>();
+			for (IncomeEvent e : k.getDrops())
+			{
+				dropped += lootValue(e.getItems());
+				collected += lootValue(e.getCollected());
+				e.getItems().forEach((id, qty) -> items.merge(id, qty, Integer::sum));
+			}
+			final Map<String, Object> row = new LinkedHashMap<>();
+			row.put("kill", k.getIndex());
+			row.put("name", k.getName());
+			row.put("at", k.getTime().toString());
+			row.put("droppedGp", dropped);
+			row.put("collectedGp", collected);
+			row.put("items", namedItems(items));
+			out.add(row);
+		}
 		return out;
 	}
 

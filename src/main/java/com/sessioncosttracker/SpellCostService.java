@@ -45,6 +45,8 @@ class SpellCostService
 		Spell spell;
 		long gp;
 		Map<String, Long> breakdown;
+		/** rune -&gt; quantity actually consumed (staff-provided runes excluded). */
+		Map<Rune, Integer> runesUsed;
 	}
 
 	Priced price(Spell spell)
@@ -57,6 +59,7 @@ class SpellCostService
 	{
 		long gp = 0;
 		Map<String, Long> breakdown = new LinkedHashMap<>();
+		Map<Rune, Integer> runesUsed = new LinkedHashMap<>();
 		for (Map.Entry<Rune, Integer> e : spell.getRunes().entrySet())
 		{
 			final Rune rune = e.getKey();
@@ -69,8 +72,9 @@ class SpellCostService
 			final long line = (long) gePrice.applyAsInt(rune.getItemId()) * qty;
 			gp += line;
 			breakdown.put(rune.getDisplayName() + " x" + qty, line);
+			runesUsed.put(rune, qty);
 		}
-		return new Priced(spell, gp, breakdown);
+		return new Priced(spell, gp, breakdown, runesUsed);
 	}
 
 	Set<Rune> equippedRuneSources()

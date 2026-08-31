@@ -4,9 +4,11 @@
  */
 package com.sessioncosttracker;
 
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
 import javax.inject.Inject;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
@@ -14,8 +16,8 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
 import net.runelite.client.util.QuantityFormatter;
 
 /**
- * Optional in-game panel showing the running session total and kill tally. Only rendered
- * while a session is active and {@code showOverlay} is enabled.
+ * Optional in-game panel showing the running session net, income, cost and kill tally.
+ * Only rendered while a session is active and {@code showOverlay} is enabled.
  */
 class SessionCostTrackerOverlay extends OverlayPanel
 {
@@ -39,23 +41,43 @@ class SessionCostTrackerOverlay extends OverlayPanel
 		}
 
 		final SessionCostTrackerPanel.View v = plugin.currentView();
+		final Color netColor = v.getNet() >= 0
+			? ColorScheme.PROGRESS_COMPLETE_COLOR
+			: ColorScheme.PROGRESS_ERROR_COLOR;
 
 		panelComponent.getChildren().add(TitleComponent.builder()
-			.text("Session cost" + (v.isPaused() ? " (paused)" : ""))
+			.text(v.getTitle() + (v.isPaused() ? " (paused)" : ""))
 			.build());
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Total")
-			.right(gp(v.getSessionTotal()))
+			.left("Net")
+			.right(gp(v.getNet()))
+			.rightColor(netColor)
 			.build());
-		if (v.getBossKills() > 0)
+		panelComponent.getChildren().add(LineComponent.builder()
+			.left("Picked up")
+			.right(gp(v.getGains()))
+			.build());
+		if (v.getPotential() != v.getGains())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Dropped")
+				.right(gp(v.getPotential()))
+				.build());
+		}
+		panelComponent.getChildren().add(LineComponent.builder()
+			.left("Spent / lost")
+			.right(gp(v.getLosses()))
+			.build());
+		if (v.getKills() > 0)
 		{
 			panelComponent.getChildren().add(LineComponent.builder()
 				.left("Kills")
-				.right(Integer.toString(v.getBossKills()))
+				.right(Integer.toString(v.getKills()))
 				.build());
 			panelComponent.getChildren().add(LineComponent.builder()
-				.left("Per kill")
-				.right(gp(v.getSessionTotal() / v.getBossKills()))
+				.left("Net / kill")
+				.right(gp(v.getNet() / v.getKills()))
+				.rightColor(netColor)
 				.build());
 		}
 		if (v.getAtRisk() > 0)
