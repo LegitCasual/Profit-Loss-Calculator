@@ -1,8 +1,8 @@
 # Session Cost Tracker
 
-A RuneLite plugin that measures a play session's **profit and loss** - loot and ground
-pickups coming in, supplies / spells / teleports / ammo / deaths going out - with a boss
-kill tally and a JSON Lines event log.
+A RuneLite plugin that measures **profit and loss** - loot and ground pickups coming in,
+supplies / spells / teleports / ammo / deaths going out - either for a whole play session
+or per kill of one mob you name, with a lifetime per-mob history and a JSON Lines event log.
 
 Income is split two ways:
 
@@ -13,31 +13,70 @@ Income is split two ways:
 `Net = collected − cost`. The gap between potential and collected is what you left on the
 floor. (Turn on *Count uncollected drops* to make the full drop count instead.)
 
-## Controls (side panel)
+## Two modes
 
-- **Start / Pause / Resume** - one button that flips with the session state. Pausing stops
-  all accrual (for banking / afk); resuming re-bases the trackers so the gap isn't counted.
-- **Stop** - finalise the session and leave the summary on screen.
-- **Restart** - finalise the current session (writing its summary to the log) and start a
-  fresh one in one click.
-- **Boss** field + **+1 kill** - set a boss name and every matching NPC death bumps the
-  kill tally automatically; the button adds one by hand. The panel and overlay show the
-  running **net per kill**.
+There are two ways to track, one at a time:
+
+- **Session** - a flat "record my profit / loss for this stretch of time" run. Loot in,
+  supplies out, one net number on the tab. Behind the scenes it still splits per mob and
+  feeds that into the History tab.
+- **Targeted farm** - you type **one** mob name and every kill of it is tracked
+  individually. Every cost you incur while the farm runs is charged to that mob, so you get
+  a real **GP per kill**. Anything else you kill shows under *Other income* and is not part
+  of the net.
 
 ### Panel layout
 
-- **Summary block** - titled with the boss name (or "Session"). Shows the **Net**, a
-  `+gains  -losses` line, `gp/hr` and `net/kill`, then two item grids:
-  - **green** - everything picked up, biggest first
-  - **red** - everything consumed (supplies, teleports, ammo, runes)
+Three tabs: **Session**, **Targeted**, **History**.
 
-  Hover any icon for its name, value and count.
-- **Kill log** - one row per boss kill (`#12  Vorkath  ·  +720k`), coloured by whether
-  that fight made or lost money. Hover a row for the full breakdown: what dropped and
-  what was spent during that fight.
-- **Income** / **Costs** - flat time-ordered lists, **off by default**. Turn on *Show
-  income list* / *Show cost list* in the config if you want them.
-- **Unresolved deaths** - a row per death awaiting a fee / gravestone decision.
+**Session tab**
+
+- **Start / Pause / Resume** - one button that flips with the state. Pausing stops all
+  accrual (banking / afk); resuming re-bases the trackers. **Stop** finalises,
+  **Restart** stops and starts fresh.
+- **Summary block** - Net, gp/hr, Gains, Losses, at-risk, then two item grids:
+  - **green** - everything picked up, biggest value first
+  - **red** - everything consumed (supplies, teleports, ammo, runes)
+- **Income** / **Costs** - extra detail lists, **off by default** (*Show income list* /
+  *Show cost list* in the config).
+- **Deaths** - a row per death awaiting a fee / gravestone decision.
+
+**Targeted tab**
+
+- Type a mob name, **Start farm**. While it runs: **Pause / Resume**, **Stop**, **Restart**
+  (restarts the same mob).
+- **Summary block** - Net, **GP/kill**, Gains, Losses, gp/hr.
+- **Per kill** - a row per kill (`#37  14:32   +12,400`), hover for that kill's drops.
+- **Other income** - loot from anything else you killed during the farm, grouped by source.
+  Shown for context; never part of the net.
+- **Costs** (with *Show cost list*) and **Deaths**.
+
+The name match is exact and case-insensitive. A mob that never fires a death event still
+counts - its loot is taken as the kill signal.
+
+**History tab**
+
+Every run - plain session **and** targeted farm - feeds this, and its mobs merge by name:
+a mob you fought across three sessions and one farm is one tidy row.
+
+- **Lifetime** net, total gained vs total cost, kills, run count.
+- One **box per mob**, sorted by net (biggest earner first): a header (`Brutus ×426`,
+  gained / cost / GP-kill, and the coloured **net** - green for profit, red for loss) over
+  an icon grid of that mob's merged drops. **Click a box** to drill into the individual
+  runs, the money-gained-vs-cost breakdown, deaths, and full drop list.
+- Cost that couldn't be tied to a mob (a teleport home while not in combat, etc.) collects
+  in a **"Not in combat"** row at the bottom.
+- **Clear history** wipes `history.jsonl` and the per-session logs (with a confirmation).
+
+### Per-mob cost attribution
+
+In a plain session, each supply, spell, teleport, ammo charge and death is charged to
+**whichever NPC you were fighting** at that moment (kept sticky for a few seconds after the
+last hit, so tank-eating right after a kill still counts). In a targeted farm everything
+goes to the target regardless. It's best-effort - drink a potion while running between packs
+and it lands in "Not in combat".
+
+Sections with nothing in them are hidden.
 
 ## What it tracks
 
@@ -51,11 +90,19 @@ floor. (Turn on *Count uncollected drops* to make the full drop count instead.)
   touched in ~5 minutes stays potential-only. Rewards and pickpockets go straight to the
   bag, so they're collected immediately.
 - **Ground pickups** - items you take off the ground (or telekinetic-grab) that aren't
-  already credited to one of your kills. Picking your own dropped items back up will count.
+  already credited to one of your kills. Picking up something you dropped yourself is not
+  counted - the plugin remembers what you drop and matches it back.
+- **High Alchemy** - the coins a High Alch cast produces are booked as income (the rune
+  cost is charged separately, so the row nets out to the real alch profit). Alching while
+  fighting counts toward that mob; otherwise it collects in a "High alch" line.
 
 Loot is valued at the **GE price**, the **High Alchemy value**, or **whichever is higher** -
 your choice in the config. Coins are always face value. It is a snapshot at the moment of
 receipt, not what you eventually sell for.
+
+A **running** session re-prices live as GE prices move. The moment a session **stops**, its
+numbers are frozen - both on the Session tab and in the History tab - so a run recorded at
+last week's prices keeps last week's values.
 
 ### Cost
 
@@ -77,14 +124,19 @@ receipt, not what you eventually sell for.
 All cost prices are live `ItemManager` GE lookups - only item identity and game-rule
 quantities (rune counts, doses, charge tiers) are in code.
 
-## Session log
+## Logs
 
-With *Write session log file* enabled, every event (session start/pause/resume/stop,
-consumable, spell, teleport, boss_kill, loot, death pending/returned/resolved) is appended
-as one JSON object per line to
-`.runelite/session-cost-tracker/session-<timestamp>.jsonl`. A `loot` line carries `kill`
-when it was attributed to a boss kill; the `session_stop` line carries the full profit /
-loss summary plus a per-kill loot breakdown.
+Files under `.runelite/session-cost-tracker/`:
+
+- **`history.jsonl`** - one line per finished run
+  (`{schema:3, kind, start, end, durationSec, valuation, perMob}`) where `perMob` maps a
+  mob name to `{kills, gained, dropped, cost, deaths, items}`. This is what the History tab
+  reads and merges. On first run older schema lines are upgraded in place and the original
+  is kept as `history-v1-backup.jsonl`.
+- **`session-<timestamp>.jsonl`** (with *Write session log file* enabled) - the detailed
+  event stream for both modes: session start/pause/resume/stop, consumable, spell,
+  teleport, kill, loot, death pending/returned/resolved. The `session_stop` line carries
+  the full summary, a per-kill breakdown and the per-mob rollup.
 
 ## Known limitations
 
@@ -100,8 +152,11 @@ loss summary plus a per-kill loot breakdown.
 - The rune *pouch* is not inspected - pouch runes are consumed and still cost gp; only
   equipped staves/tomes remove a rune from the bill.
 - Ammo "fired" is what left the quiver - Ava's-recovered shots never register.
-- Boss matching is a case-insensitive *contains* on the NPC name; multi-part bosses
-  (Great Olm's claws, Hydra phases) can over-count despite the short debounce.
+- A targeted farm matches the mob name **exactly** (case-insensitive). Multi-part bosses
+  whose name changes between phases, or where two die close together with a single loot
+  event, can miscount a kill despite the short debounce.
+- A targeted farm's net is the target only. Stray loot shows under *Other income* but is
+  not netted, and skilling / clue steps done mid-farm are not counted.
 
 ## Build
 

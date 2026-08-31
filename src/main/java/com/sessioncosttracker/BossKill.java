@@ -11,24 +11,23 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * One boss kill and the loot events attributed to it. The {@link IncomeEvent}s here are the
- * same objects held in {@link Session#getIncome()} - this is just a per-kill grouping for
- * the panel and the session log, not a second copy of the data.
+ * One kill of the farmed mob and the loot events attributed to it. The {@link IncomeEvent}s
+ * here are the same objects held in {@link Session#getIncome()} - this is just a per-kill
+ * grouping for the panel and the session log, not a second copy of the data.
  */
 @Getter
 class BossKill
 {
-	/** 1-based kill number within the session. */
+	/** 1-based kill number within the farm. */
 	private final int index;
 	private final Instant time;
-	/** NPC name that triggered the kill (or the configured boss name for a manual +1). */
+	/** NPC name that triggered the kill. */
 	private final String name;
 	private final List<IncomeEvent> drops = new ArrayList<>();
 
-	/** Session running ammo-gp total at the moment of the kill - lets a fight's ammo spend
-	 *  be derived as the delta from the previous kill. */
+	/** Game tick the kill was registered - for attributing late loot. */
 	@Setter
-	private long ammoGpAtKill;
+	private int killTick;
 
 	BossKill(int index, Instant time, String name)
 	{

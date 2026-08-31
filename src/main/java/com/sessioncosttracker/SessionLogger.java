@@ -39,6 +39,7 @@ class SessionLogger
 	private ExecutorService executor;
 	private Writer writer;
 	private Path path;
+	private String sessionId;
 
 	@Inject
 	SessionLogger(Gson gson)
@@ -46,8 +47,15 @@ class SessionLogger
 		this.gson = gson;
 	}
 
+	/** Stable id for the session in progress - the file-name timestamp stem. */
+	String sessionId()
+	{
+		return sessionId;
+	}
+
 	synchronized void open(Instant start)
 	{
+		sessionId = FILE_TS.format(start);
 		executor = Executors.newSingleThreadExecutor(r ->
 		{
 			Thread t = new Thread(r, "session-cost-tracker-log");
@@ -55,7 +63,7 @@ class SessionLogger
 			return t;
 		});
 		final Path target = RuneLite.RUNELITE_DIR.toPath().resolve(DIR_NAME)
-			.resolve("session-" + FILE_TS.format(start) + ".jsonl");
+			.resolve("session-" + sessionId + ".jsonl");
 		executor.execute(() ->
 		{
 			try

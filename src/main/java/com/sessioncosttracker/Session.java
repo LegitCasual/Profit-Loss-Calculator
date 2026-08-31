@@ -17,6 +17,11 @@ import lombok.Setter;
  * One Start-to-Stop run. Holds every cost event, every income event, every death, the ammo
  * tally and the boss kill count. Can be paused - while paused the plugin stops accruing to
  * it.
+ *
+ * <p>A run is one of two modes. A plain <b>session</b> ({@code targetMob == null}) is a flat
+ * "record my profit / loss for this stretch of time" ledger. A <b>targeted farm</b>
+ * ({@code targetMob} set) only attributes kills and loot for that one mob - every cost while
+ * it runs is charged to the farm, and the panel shows a per-kill net.
  */
 @Getter
 class Session
@@ -28,6 +33,10 @@ class Session
 
 	@Setter
 	private boolean paused;
+
+	/** Non-null =&gt; this run is a targeted farm of that mob (exact, case-insensitive name). */
+	@Setter
+	private String targetMob;
 
 	private final List<CostEvent> events = new ArrayList<>();
 	private final List<IncomeEvent> income = new ArrayList<>();
@@ -43,9 +52,46 @@ class Session
 
 	private int deathSeq;
 
+	/** Plain-session kill tally (a targeted farm counts {@link #kills} buckets instead). */
+	private int killCount;
+
+	/** NPC name -&gt; kills of it this run. Empty key is never used. */
+	private final Map<String, Integer> killsByMob = new LinkedHashMap<>();
+
+	/** NPC name -&gt; gp spent while fighting it (consumables, spells, teleports, ammo). The
+	 *  empty-string key holds cost incurred while not in combat. Deaths are added here on
+	 *  resolution. */
+	private final Map<String, Long> costByMob = new LinkedHashMap<>();
+
 	Session(Instant startTime)
 	{
 		this.startTime = startTime;
+	}
+
+	/** Bump the kill tally, and the per-mob count for {@code mob} (if given). */
+	void bumpKill(String mob)
+	{
+		killCount++;
+		if (mob != null && !mob.isEmpty())
+		{
+			killsByMob.merge(mob, 1, Integer::sum);
+		}
+	}
+
+	/** Charge {@code gp} against {@code mob} ({@code null}/empty =&gt; the "not in combat" bucket). */
+	void addMobCost(String mob, long gp)
+	{
+		if (gp == 0)
+		{
+			return;
+		}
+		costByMob.merge(mob == null ? "" : mob, gp, Long::sum);
+	}
+
+	/** True when this run is a targeted farm rather than a plain session. */
+	boolean isTargeted()
+	{
+		return targetMob != null && !targetMob.isEmpty();
 	}
 
 	int nextDeathId()
@@ -68,11 +114,10 @@ class Session
 		deaths.add(death);
 	}
 
-	/** Open a new boss kill bucket; later loot that matches is attributed to it. */
+	/** Open a new kill bucket for the farmed mob; later matching loot is attributed to it. */
 	BossKill addBossKill(String name)
 	{
 		final BossKill kill = new BossKill(kills.size() + 1, Instant.now(), name);
-		kill.setAmmoGpAtKill(ammoTotal());
 		kills.add(kill);
 		return kill;
 	}
@@ -88,9 +133,11 @@ class Session
 		return kills.isEmpty() ? null : kills.get(kills.size() - 1);
 	}
 
+	/** Kill count for the panel: farm buckets when targeted, else the plain tally (never
+	 *  less than the number of buckets, so direct {@link #addBossKill} in tests still counts). */
 	int getBossKills()
 	{
-		return kills.size();
+		return isTargeted() ? kills.size() : Math.max(killCount, kills.size());
 	}
 
 	/** Replace the ammo tally (the tracker hands back a fresh running total each time). */
