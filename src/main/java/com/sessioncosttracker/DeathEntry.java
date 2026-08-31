@@ -62,6 +62,11 @@ class DeathEntry
 	@Setter
 	private boolean userConfirmed;
 
+	/** NPC the player was fighting when they died - for per-mob cost attribution. Null if
+	 *  not in combat (e.g. fell in the Wilderness to another player, or an environmental death). */
+	@Setter
+	private String mob;
+
 	DeathEntry(int id, Instant deathTime, Map<Integer, Integer> lostItems, long fullValue)
 	{
 		this.id = id;

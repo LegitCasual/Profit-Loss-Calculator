@@ -37,20 +37,9 @@ public interface SessionCostTrackerConfig extends Config
 	String incomeSection = "income";
 
 	@ConfigItem(
-		keyName = "bossName",
-		name = "Boss name",
-		description = "When set, killing an NPC whose name contains this bumps the session's kill tally automatically. Also editable from the side panel.",
-		position = 0
-	)
-	default String bossName()
-	{
-		return "";
-	}
-
-	@ConfigItem(
 		keyName = "showOverlay",
 		name = "In-game overlay",
-		description = "Show the running session total (and kill tally) as an overlay while a session is running",
+		description = "Show the running session net and kill tally as an overlay while a session is running",
 		position = 1
 	)
 	default boolean showOverlay()
@@ -60,8 +49,8 @@ public interface SessionCostTrackerConfig extends Config
 
 	@ConfigItem(
 		keyName = "showIncomeList",
-		name = "Show income list",
-		description = "Also show a flat time-ordered list of every loot / pickup below the summary and kill log.",
+		name = "Show income list (Session tab)",
+		description = "On the Session tab, also show income grouped one row per source. The Targeted tab always shows its 'Other income'.",
 		position = 4
 	)
 	default boolean showIncomeList()
@@ -72,7 +61,7 @@ public interface SessionCostTrackerConfig extends Config
 	@ConfigItem(
 		keyName = "showCostList",
 		name = "Show cost list",
-		description = "Also show a flat time-ordered list of every consumable / spell / teleport / ammo cost.",
+		description = "Also show a flat time-ordered list of every consumable / spell / teleport / ammo cost (both tabs).",
 		position = 5
 	)
 	default boolean showCostList()

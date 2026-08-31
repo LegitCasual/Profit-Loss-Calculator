@@ -28,6 +28,8 @@ class SessionSummary
 	/** Value of everything that dropped, collected or not. */
 	long potential;
 	int bossKills;
+	/** Number of deaths counted toward the cost total. */
+	int deaths;
 
 	/** gp spent - supplies, spells, teleports, ammo and confirmed death costs. */
 	long total()
@@ -63,7 +65,8 @@ class SessionSummary
 			session.atRiskTotal(),
 			collected,
 			potential,
-			session.getBossKills());
+			session.getBossKills(),
+			(int) session.getDeaths().stream().filter(DeathEntry::isCounted).count());
 	}
 
 	Map<String, Object> toJsonFields()
@@ -80,6 +83,7 @@ class SessionSummary
 		m.put("potentialIncome", potential);
 		m.put("net", net());
 		m.put("bossKills", bossKills);
+		m.put("deaths", deaths);
 		return m;
 	}
 

@@ -42,7 +42,9 @@ class IncomeEvent
 		/** Pickpocketing (RuneLite {@code LootRecordType.PICKPOCKET}). */
 		PICKPOCKET,
 		/** Taken off the ground, not attributable to one of your own kills. */
-		PICKUP
+		PICKUP,
+		/** Coins from a High Alchemy cast. */
+		ALCH
 	}
 
 	private final Type type;

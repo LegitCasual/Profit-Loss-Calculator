@@ -74,11 +74,14 @@ class SessionCostTrackerOverlay extends OverlayPanel
 				.left("Kills")
 				.right(Integer.toString(v.getKills()))
 				.build());
-			panelComponent.getChildren().add(LineComponent.builder()
-				.left("Net / kill")
-				.right(gp(v.getNet() / v.getKills()))
-				.rightColor(netColor)
-				.build());
+			if (v.isTargeted())
+			{
+				panelComponent.getChildren().add(LineComponent.builder()
+					.left("Net / kill")
+					.right(gp(v.getGpPerKill()))
+					.rightColor(netColor)
+					.build());
+			}
 		}
 		if (v.getAtRisk() > 0)
 		{
