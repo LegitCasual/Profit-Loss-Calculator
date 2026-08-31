@@ -48,6 +48,10 @@ public class SpellCostServiceTest
 		// fire free; 3 air * 4 + 1 chaos * 90
 		assertEquals(102, p.getGp());
 		assertTrue(p.getBreakdown().containsKey("Fire (staff)"));
+		// staff-provided fire is not in the consumed-runes map
+		assertNull(p.getRunesUsed().get(Rune.FIRE));
+		assertEquals(Integer.valueOf(3), p.getRunesUsed().get(Rune.AIR));
+		assertEquals(Integer.valueOf(1), p.getRunesUsed().get(Rune.CHAOS));
 	}
 
 	@Test

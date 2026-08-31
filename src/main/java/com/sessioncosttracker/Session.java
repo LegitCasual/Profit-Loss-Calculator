@@ -9,12 +9,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.ToLongFunction;
 import lombok.Getter;
 import lombok.Setter;
 
 /**
- * One Start-to-Stop run. Holds every cost event, every death, the ammo tally and the boss
- * kill count. Can be paused - while paused the plugin stops accruing costs to it.
+ * One Start-to-Stop run. Holds every cost event, every income event, every death, the ammo
+ * tally and the boss kill count. Can be paused - while paused the plugin stops accruing to
+ * it.
  */
 @Getter
 class Session
@@ -27,14 +29,17 @@ class Session
 	@Setter
 	private boolean paused;
 
-	private int bossKills;
-
 	private final List<CostEvent> events = new ArrayList<>();
+	private final List<IncomeEvent> income = new ArrayList<>();
 	private final List<DeathEntry> deaths = new ArrayList<>();
+	private final List<BossKill> kills = new ArrayList<>();
 
 	/** Ammo used this session: item id -&gt; {fired, recovered, net}. */
 	private Map<Integer, long[]> ammoStats = new LinkedHashMap<>();
 	private long ammoGp;
+
+	/** Runes consumed by spell casts this session: rune item id -&gt; quantity. */
+	private final Map<Integer, Integer> runesUsed = new LinkedHashMap<>();
 
 	private int deathSeq;
 
@@ -53,14 +58,39 @@ class Session
 		events.add(event);
 	}
 
+	void add(IncomeEvent event)
+	{
+		income.add(event);
+	}
+
 	void add(DeathEntry death)
 	{
 		deaths.add(death);
 	}
 
-	void addBossKill()
+	/** Open a new boss kill bucket; later loot that matches is attributed to it. */
+	BossKill addBossKill(String name)
 	{
-		bossKills++;
+		final BossKill kill = new BossKill(kills.size() + 1, Instant.now(), name);
+		kill.setAmmoGpAtKill(ammoTotal());
+		kills.add(kill);
+		return kill;
+	}
+
+	/** Record runes spent on a cast (rune item id -&gt; quantity), for the loss icon grid. */
+	void addRunes(Map<Integer, Integer> runes)
+	{
+		runes.forEach((id, qty) -> runesUsed.merge(id, qty, Integer::sum));
+	}
+
+	BossKill lastKill()
+	{
+		return kills.isEmpty() ? null : kills.get(kills.size() - 1);
+	}
+
+	int getBossKills()
+	{
+		return kills.size();
 	}
 
 	/** Replace the ammo tally (the tracker hands back a fresh running total each time). */
@@ -114,8 +144,18 @@ class Session
 		return deaths.stream().mapToLong(DeathEntry::atRiskValue).sum();
 	}
 
+	/** Total gp spent this session (supplies, spells, teleports, ammo, confirmed deaths). */
 	long total()
 	{
 		return consumableTotal() + spellTotal() + teleportTotal() + ammoTotal() + confirmedDeathTotal();
+	}
+
+	/**
+	 * Value of every income event, priced by the caller's function (which chooses whether
+	 * to look at what dropped or only what was collected).
+	 */
+	long incomeTotal(ToLongFunction<IncomeEvent> pricer)
+	{
+		return income.stream().mapToLong(pricer).sum();
 	}
 }
