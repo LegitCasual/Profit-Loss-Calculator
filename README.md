@@ -164,3 +164,11 @@ Files under `.runelite/session-cost-tracker/`:
 ./gradlew build      # compile + unit tests
 ./gradlew run        # launch a dev client with the plugin loaded
 ```
+
+## License
+
+Free and open source under the [BSD 2-Clause License](LICENSE). Please also read
+[NOTICE.md](NOTICE.md) — the licence lets you fork and modify freely; the notice is my
+ask that you send changes back as pull requests rather than publishing a separate
+modified copy, and keep the copyright line on anything derived from this. Fixes and
+ideas are very welcome as issues / PRs.

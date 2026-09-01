@@ -66,6 +66,9 @@ class SessionCostTrackerPanel extends PluginPanel
 
 		/** Re-read history.jsonl from disk and push a fresh snapshot to the History tab. */
 		void onRefreshHistory();
+
+		/** The first-run screen's Continue button was clicked - persist that it's been seen. */
+		void onWelcomeDismissed();
 	}
 
 	/** One item cell in a gain / loss grid. */
@@ -176,7 +179,11 @@ class SessionCostTrackerPanel extends PluginPanel
 	private final TargetedContent targetedContent;
 	private final HistoryContent historyContent;
 
-	SessionCostTrackerPanel(Controls controls, ItemManager itemManager)
+	/** Holds the tabs + tab content. Swapped out for {@link #welcome} on first run. */
+	private final JPanel contentHost = new JPanel(new BorderLayout());
+	private final WelcomeContent welcome;
+
+	SessionCostTrackerPanel(Controls controls, ItemManager itemManager, boolean showWelcome)
 	{
 		this.controls = controls;
 		this.itemManager = itemManager;
@@ -271,11 +278,28 @@ class SessionCostTrackerPanel extends PluginPanel
 		tabs.addTab(sessionTab);
 		tabs.addTab(targetedTab);
 		tabs.addTab(historyTab);
-		add(tabs, BorderLayout.NORTH);
-		add(display, BorderLayout.CENTER);
+		contentHost.add(tabs, BorderLayout.NORTH);
+		contentHost.add(display, BorderLayout.CENTER);
 		tabs.select(sessionTab);
 
+		welcome = new WelcomeContent(this::dismissWelcome);
+		add(showWelcome ? welcome : contentHost, BorderLayout.CENTER);
+
 		render(View.builder().build());
+	}
+
+	/** Leave the first-run screen for good and reveal the tabs. */
+	private void dismissWelcome()
+	{
+		if (welcome.getParent() == null)
+		{
+			return;
+		}
+		remove(welcome);
+		add(contentHost, BorderLayout.CENTER);
+		revalidate();
+		repaint();
+		controls.onWelcomeDismissed();
 	}
 
 	private static void section(JPanel holder, String title, JPanel body)

@@ -268,7 +268,7 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 	@Override
 	protected void startUp()
 	{
-		panel = new SessionCostTrackerPanel(this, itemManager);
+		panel = new SessionCostTrackerPanel(this, itemManager, !config.welcomeSeen());
 
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "panel_icon.png");
 		navButton = NavigationButton.builder()
@@ -425,6 +425,12 @@ public class SessionCostTrackerPlugin extends Plugin implements SessionCostTrack
 	public void onDeleteMob(String mob)
 	{
 		history.deleteMob(mob, this::pushHistory);
+	}
+
+	@Override
+	public void onWelcomeDismissed()
+	{
+		config.welcomeSeen(true);
 	}
 
 	// ------------------------------------------------------------------ session lifecycle
