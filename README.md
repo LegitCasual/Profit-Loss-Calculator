@@ -1,4 +1,4 @@
-# Session Cost Tracker
+# Profit Loss Calculator
 
 A RuneLite plugin that measures **profit and loss** - loot and ground pickups coming in,
 supplies / spells / teleports / ammo / deaths going out - either for a whole play session
@@ -126,7 +126,7 @@ quantities (rune counts, doses, charge tiers) are in code.
 
 ## Logs
 
-Files under `.runelite/session-cost-tracker/`:
+Files under `.runelite/profit-loss-calculator/`:
 
 - **`history.jsonl`** - one line per finished run
   (`{schema:3, kind, start, end, durationSec, valuation, perMob}`) where `perMob` maps a
