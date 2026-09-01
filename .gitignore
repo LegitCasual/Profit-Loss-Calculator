@@ -1,6 +1,7 @@
 .gradle
 build
 bin/
+dist/
 .idea/
 .vscode/
 .project

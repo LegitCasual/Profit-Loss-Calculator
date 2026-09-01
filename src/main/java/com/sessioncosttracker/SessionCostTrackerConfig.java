@@ -187,4 +187,24 @@ public interface SessionCostTrackerConfig extends Config
 	{
 		return 0;
 	}
+
+	// Internal state, not a user setting - set once the first-run notice has been shown.
+	@ConfigItem(
+		keyName = "welcomeSeen",
+		name = "welcomeSeen",
+		description = "Internal - the first-run notice has been shown",
+		hidden = true
+	)
+	default boolean welcomeSeen()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "welcomeSeen",
+		name = "welcomeSeen",
+		description = "Internal - the first-run notice has been shown",
+		hidden = true
+	)
+	void welcomeSeen(boolean seen);
 }
