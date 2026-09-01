@@ -1,6 +1,6 @@
 # A note from the author
 
-Session Cost Tracker is free and open source under the [BSD 2-Clause License](LICENSE).
+Profit Loss Calculator is free and open source under the [BSD 2-Clause License](LICENSE).
 The licence lets you do almost anything, including fork and modify it. This file is not
 part of the licence and adds no legal conditions — it's just what I'd appreciate:
 
