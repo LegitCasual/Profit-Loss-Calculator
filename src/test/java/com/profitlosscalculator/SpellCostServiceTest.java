@@ -75,6 +75,42 @@ public class SpellCostServiceTest
 	}
 
 	@Test
+	public void iceBarrageChargesWaterBloodDeath()
+	{
+		price(Rune.WATER, 5);
+		price(Rune.BLOOD, 300);
+		price(Rune.DEATH, 200);
+		SpellCostService.Priced p = SpellCostService.price(Spell.ICE_BARRAGE, EnumSet.noneOf(Rune.class), ge);
+		// 6 water * 5 + 2 blood * 300 + 4 death * 200
+		assertEquals(30 + 600 + 800, p.getGp());
+		assertEquals(Integer.valueOf(6), p.getRunesUsed().get(Rune.WATER));
+	}
+
+	@Test
+	public void kodaiFreesWaterOnIceBarrage()
+	{
+		price(Rune.WATER, 5);
+		price(Rune.BLOOD, 300);
+		price(Rune.DEATH, 200);
+		SpellCostService.Priced p = SpellCostService.price(Spell.ICE_BARRAGE, Staff.KODAI.getRunes(), ge);
+		// water free; 2 blood * 300 + 4 death * 200
+		assertEquals(600 + 800, p.getGp());
+		assertTrue(p.getBreakdown().containsKey("Water (staff)"));
+		assertNull(p.getRunesUsed().get(Rune.WATER));
+	}
+
+	@Test
+	public void bloodBarrageChargesSoulRune()
+	{
+		price(Rune.BLOOD, 300);
+		price(Rune.DEATH, 200);
+		price(Rune.SOUL, 150);
+		SpellCostService.Priced p = SpellCostService.price(Spell.BLOOD_BARRAGE, EnumSet.noneOf(Rune.class), ge);
+		// 4 blood * 300 + 4 death * 200 + 1 soul * 150
+		assertEquals(1200 + 800 + 150, p.getGp());
+	}
+
+	@Test
 	public void staffLookupByItemId()
 	{
 		assertSame(Staff.AIR, Staff.byItemId(Staff.AIR.getItemIds()[0]));

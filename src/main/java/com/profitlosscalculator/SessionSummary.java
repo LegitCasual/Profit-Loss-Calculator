@@ -21,6 +21,7 @@ class SessionSummary
 	long spells;
 	long teleports;
 	long ammo;
+	long chargedWeapons;
 	long deathConfirmed;
 	long atRisk;
 	/** Value of loot that actually made it into the bag - this is what counts. */
@@ -31,10 +32,10 @@ class SessionSummary
 	/** Number of deaths counted toward the cost total. */
 	int deaths;
 
-	/** gp spent - supplies, spells, teleports, ammo and confirmed death costs. */
+	/** gp spent - supplies, spells, teleports, ammo, weapon charges and confirmed death costs. */
 	long total()
 	{
-		return consumables + spells + teleports + ammo + deathConfirmed;
+		return consumables + spells + teleports + ammo + chargedWeapons + deathConfirmed;
 	}
 
 	/** Collected income minus cost. */
@@ -61,6 +62,7 @@ class SessionSummary
 			session.spellTotal(),
 			session.teleportTotal(),
 			session.ammoTotal(),
+			session.chargedWeaponTotal(),
 			session.confirmedDeathTotal(),
 			session.atRiskTotal(),
 			collected,
@@ -76,6 +78,7 @@ class SessionSummary
 		m.put("spells", spells);
 		m.put("teleports", teleports);
 		m.put("ammo", ammo);
+		m.put("chargedWeapons", chargedWeapons);
 		m.put("deathConfirmed", deathConfirmed);
 		m.put("atRiskUnresolved", atRisk);
 		m.put("cost", total());
@@ -94,6 +97,7 @@ class SessionSummary
 		sb.append(String.format("  spells     %s%n", gp(spells)));
 		sb.append(String.format("  teleports  %s%n", gp(teleports)));
 		sb.append(String.format("  ammo       %s%n", gp(ammo)));
+		sb.append(String.format("  charges    %s%n", gp(chargedWeapons)));
 		sb.append(String.format("  deaths     %s%n", gp(deathConfirmed)));
 		sb.append(String.format("  Cost total:    %s%n", gp(total())));
 		sb.append(String.format("  Collected:     %s%n", gp(collected)));
