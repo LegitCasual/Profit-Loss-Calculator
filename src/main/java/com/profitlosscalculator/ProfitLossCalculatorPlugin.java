@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -27,8 +28,11 @@ import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
+import net.runelite.api.ActorSpotAnim;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.EnumComposition;
+import net.runelite.api.EnumID;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
 import net.runelite.api.Item;
@@ -38,9 +42,11 @@ import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.events.ActorDeath;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.VarbitChanged;
@@ -108,6 +114,24 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	/** Within this window of a kill, extra matching loot is that same kill's (split drop). */
 	private static final int LOOT_SAME_KILL_TICKS = 5;
+
+	/** NPC names (lower-case) that fire a scripted {@code ActorDeath} at a phase transition,
+	 *  well before the real kill - The Whisperer sinks at the end of phase 1, heals 140 hp and
+	 *  fights on through the enrage phase. That scripted death would otherwise count as an
+	 *  extra kill, so these are tallied from the loot drop instead (the game sends it once, on
+	 *  the real death). Awakened variants may need their own name added here. */
+	private static final Set<String> PHASE_DEATH_MOBS = Collections.singleton("the whisperer");
+
+	/** Rune-pouch slots: type (which rune) and quantity, read alongside inv + worn so runes
+	 *  picked up straight into the pouch still count as loot collected. */
+	private static final int[] RUNE_POUCH_TYPE_VARBITS = {
+		VarbitID.RUNE_POUCH_TYPE_1, VarbitID.RUNE_POUCH_TYPE_2, VarbitID.RUNE_POUCH_TYPE_3,
+		VarbitID.RUNE_POUCH_TYPE_4, VarbitID.RUNE_POUCH_TYPE_5, VarbitID.RUNE_POUCH_TYPE_6,
+	};
+	private static final int[] RUNE_POUCH_AMOUNT_VARBITS = {
+		VarbitID.RUNE_POUCH_QUANTITY_1, VarbitID.RUNE_POUCH_QUANTITY_2, VarbitID.RUNE_POUCH_QUANTITY_3,
+		VarbitID.RUNE_POUCH_QUANTITY_4, VarbitID.RUNE_POUCH_QUANTITY_5, VarbitID.RUNE_POUCH_QUANTITY_6,
+	};
 
 	private static final int AMMO_SLOT = EquipmentInventorySlot.AMMO.getSlotIdx();
 	private static final int WEAPON_SLOT = EquipmentInventorySlot.WEAPON.getSlotIdx();
@@ -204,6 +228,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private static final int OPPONENT_STICKY_TICKS = 8;
 	/** running ammo gp already charged to a mob - the delta is attributed on each reconcile. */
 	private long ammoGpCharged;
+
+	/** Charged-weapon (Venator bow / Eye of Ayak / Tumeken's shadow) charge-spend tracking,
+	 *  counted from the attack spot-anim - the game has no live charge varbit. */
+	private final ChargedWeaponTracker chargedWeaponTracker = new ChargedWeaponTracker();
+	/** running charged-weapon gp already charged to a mob - the delta is attributed each attack. */
+	private long chargedWeaponGpCharged;
 
 	// income tracking
 	/** decides how much of each drop actually reached the bag ("collected") vs stayed on
@@ -488,18 +518,20 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		currentOpponent = null;
 		opponentTick = -100;
 		ammoGpCharged = 0;
+		chargedWeaponGpCharged = 0;
 		stateHistory.clear();
 		pushStateHistory();
 
 		teleTabCache.clear();
 		bankOpen = client.getWidget(InterfaceID.Bankmain.ITEMS) != null;
-		prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		prevTickItems = trackedItems();
 		if (teleChargesById.isEmpty())
 		{
 			teleChargesById = buildTeleChargeMap();
 			teleCostPerCharge = buildTelePerChargeCost();
 		}
 		ammoTracker.reset(ammoOwned());
+		chargedWeaponTracker.reset();
 		pickupTracker.reset();
 		lootCollector.clear();
 		dropIntent.clear();
@@ -533,7 +565,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// re-base the trackers past the paused stretch so banking / afk doesn't accrue
 		ammoTracker.reset(ammoOwned());
 		pickupTracker.reset();
-		prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		prevTickItems = trackedItems();
 		logger.line(paused ? "session_pause" : "session_resume").submit();
 		refreshView();
 	}
@@ -590,6 +622,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			.put("valuation", config.incomeValuation().name())
 			.put("summary", summary.toJsonFields())
 			.put("ammoItems", ammoItemsLog(session.getAmmoStats()))
+			.put("chargedWeapons", chargedWeaponsLog())
 			.put("kills", killsLog())
 			.put("perMob", perMob)
 			.submit();
@@ -758,6 +791,46 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	}
 
 	@Subscribe
+	public void onGraphicChanged(GraphicChanged event)
+	{
+		if (!localPlayerAttackTracked(event.getActor()))
+		{
+			return;
+		}
+		for (ActorSpotAnim sa : event.getActor().getSpotAnims())
+		{
+			chargedAttackSignal(sa.getId());
+		}
+	}
+
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged event)
+	{
+		if (localPlayerAttackTracked(event.getActor()))
+		{
+			chargedAttackSignal(event.getActor().getAnimation());
+		}
+	}
+
+	/** True when {@code actor} is us and a charged-weapon attack should be counted right now. */
+	private boolean localPlayerAttackTracked(Actor actor)
+	{
+		return actor != null && actor == client.getLocalPlayer()
+			&& deathWindowTicks == 0 && accruing() && config.trackChargedWeapons();
+	}
+
+	/** An animation / spot-anim id fired on the player - if it is a charged weapon's attack
+	 *  and that weapon is wielded, count one charge. */
+	private void chargedAttackSignal(int id)
+	{
+		final ChargedWeapon weapon = ChargedWeapon.byAttackSignal(id);
+		if (weapon != null && isWielding(weapon))
+		{
+			recordChargedAttack(weapon);
+		}
+	}
+
+	@Subscribe
 	public void onGameTick(GameTick event)
 	{
 		if (!tracking())
@@ -772,7 +845,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// unequipping jewellery (item moves inv<->worn within a tick, net zero) never looks
 		// like a teleport. Skip while banking / paused - a deposit would look like spending
 		// the last charge, a withdrawal like a pickup.
-		final Map<Integer, Integer> curItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		final Map<Integer, Integer> curItems = trackedItems();
 		if (deathWindowTicks == 0 && !bankOpen && !session.isPaused())
 		{
 			if (!prevTickItems.isEmpty())
@@ -847,6 +920,52 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 	}
 
+	/**
+	 * Inventory + equipment + rune pouch, as {@code itemId -> quantity}. This is the view the
+	 * income / teleport diffing works against: runes that a pickup drops straight into the
+	 * pouch (bypassing the inventory) still show as a gain. Moving runes between the inventory
+	 * and the pouch nets to zero, and spending pouch runes on a cast is a loss nothing credits.
+	 */
+	private Map<Integer, Integer> trackedItems()
+	{
+		return ContainerSnapshot.union(
+			ContainerSnapshot.union(lastKnownInv, lastKnownWorn), runePouchContents());
+	}
+
+	/** Rune-pouch contents as {@code itemId -> quantity}; empty when there is no pouch. */
+	private Map<Integer, Integer> runePouchContents()
+	{
+		final EnumComposition runes;
+		try
+		{
+			runes = client.getEnum(EnumID.RUNEPOUCH_RUNE);
+		}
+		catch (RuntimeException ex)
+		{
+			return Collections.emptyMap();
+		}
+		if (runes == null)
+		{
+			return Collections.emptyMap();
+		}
+		final Map<Integer, Integer> out = new HashMap<>();
+		for (int i = 0; i < RUNE_POUCH_TYPE_VARBITS.length; i++)
+		{
+			final int type = client.getVarbitValue(RUNE_POUCH_TYPE_VARBITS[i]);
+			final int qty = client.getVarbitValue(RUNE_POUCH_AMOUNT_VARBITS[i]);
+			if (type <= 0 || qty <= 0)
+			{
+				continue;
+			}
+			final int itemId = runes.getIntValue(type);
+			if (itemId > 0)
+			{
+				out.merge(itemId, qty, Integer::sum);
+			}
+		}
+		return out;
+	}
+
 	private void pushStateHistory()
 	{
 		stateHistory.addLast(ContainerSnapshot.union(lastKnownInv, lastKnownWorn));
@@ -886,7 +1005,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			ammoTracker.reset(ammoOwned());
 			pickupTracker.reset();
-			prevTickItems = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+			prevTickItems = trackedItems();
 		}
 	}
 
@@ -985,6 +1104,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			return;
 		}
+
+		// A phase-transition boss fires this event for its scripted death too (see
+		// PHASE_DEATH_MOBS) - count it from the loot drop instead, in onLootReceived. Falls
+		// through to normal counting when loot tracking is off and there is no drop to count.
+		if (config.trackLoot() && isPhaseDeathMob(name))
+		{
+			return;
+		}
 		final int tick = client.getTickCount();
 
 		if (!session.isTargeted())
@@ -1021,6 +1148,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return false;
 		}
 		return Text.removeTags(candidate).trim().equalsIgnoreCase(target.trim());
+	}
+
+	/** True when {@code npcName} is one of the {@link #PHASE_DEATH_MOBS}. */
+	private static boolean isPhaseDeathMob(String npcName)
+	{
+		return npcName != null
+			&& PHASE_DEATH_MOBS.contains(Text.removeTags(npcName).trim().toLowerCase(Locale.ROOT));
 	}
 
 	/** Note who the player is fighting, so a supply used mid-fight is charged to that mob. */
@@ -1064,6 +1198,27 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			.put("count", session.getBossKills())
 			.submit();
 		return k;
+	}
+
+	/** Plain-session kill tally for a {@link #PHASE_DEATH_MOBS phase-transition boss}, driven
+	 *  by its loot drop. Debounced against split loot events for the one kill. */
+	private void bumpPhaseDeathKill(String source)
+	{
+		final String name = Text.removeTags(source).trim();
+		final int tick = client.getTickCount();
+		if (tick - lastPlainKillTick < LOOT_SAME_KILL_TICKS && name.equals(lastPlainKillName))
+		{
+			return;
+		}
+		lastPlainKillTick = tick;
+		lastPlainKillName = name;
+		session.bumpKill(name);
+		logger.line("kill")
+			.put("source", "loot")
+			.put("mob", name)
+			.put("count", session.getBossKills())
+			.submit();
+		refreshView();
 	}
 
 	// ------------------------------------------------------------------ income
@@ -1131,6 +1286,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				kill = openKill(key, tick, "loot");
 			}
 			kill.add(ie);
+		}
+		else if (type == IncomeEvent.Type.NPC_LOOT && !session.isTargeted() && isPhaseDeathMob(source))
+		{
+			// handleNpcKill ignores this boss's scripted death and a plain session has no loot
+			// bucket to hang the count on - so count the kill here, off the drop.
+			bumpPhaseDeathKill(source);
 		}
 
 		logger.line("loot")
@@ -1578,6 +1739,36 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// charge the growth in ammo spend to whoever is being shot at
 		session.addMobCost(costMob(), gp - ammoGpCharged);
 		ammoGpCharged = gp;
+		viewDirty = true;
+	}
+
+	// ------------------------------------------------------------------ charged weapons
+
+	/** True when {@code weapon} is the item in the weapon slot right now. */
+	private boolean isWielding(ChargedWeapon weapon)
+	{
+		final ItemContainer worn = client.getItemContainer(InventoryID.WORN);
+		final Item w = worn == null ? null : worn.getItem(WEAPON_SLOT);
+		return w != null && w.getId() > 0 && weapon.isWeaponItem(w.getId());
+	}
+
+	/** One attack with {@code weapon} = one charge spent; re-price the running total and
+	 *  charge the growth to whoever is being fought. */
+	private void recordChargedAttack(ChargedWeapon weapon)
+	{
+		if (session == null || !chargedWeaponTracker.recordAttack(weapon, client.getTickCount()))
+		{
+			return;
+		}
+		final Map<ChargedWeapon, Long> spent = chargedWeaponTracker.spent();
+		long gp = 0;
+		for (Map.Entry<ChargedWeapon, Long> e : spent.entrySet())
+		{
+			gp += e.getKey().cost(e.getValue(), priceLookup::ge);
+		}
+		session.setChargedWeapons(spent, gp);
+		session.addMobCost(costMob(), gp - chargedWeaponGpCharged);
+		chargedWeaponGpCharged = gp;
 		viewDirty = true;
 	}
 
@@ -2162,6 +2353,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				}
 			});
 		}
+		session.getChargedWeaponsSpent().forEach((weapon, charges) ->
+		{
+			if (charges > 0)
+			{
+				weapon.materials(charges).forEach((id, q) -> qty.merge(id, q, Integer::sum));
+			}
+		});
 		return gridItems(qty, (id, q) ->
 			IncomeValuation.value(id, q, IncomeValuation.Mode.GE, priceLookup));
 	}
@@ -2336,7 +2534,37 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			lines.add(new ProfitLossCalculatorPanel.EventLine(
 				"ammo", "", "Ammo used", s.ammoTotal(), ammoBreakdown(s.getAmmoStats())));
 		}
+		if (s.chargedWeaponTotal() > 0)
+		{
+			lines.add(new ProfitLossCalculatorPanel.EventLine(
+				"ammo", "", "Weapon charges", s.chargedWeaponTotal(), chargedWeaponBreakdown(s)));
+		}
 		return lines;
+	}
+
+	/** "Venator bow — 4,213 charges — 80k" per line, most-charged first. */
+	private String chargedWeaponBreakdown(Session s)
+	{
+		final List<Map.Entry<ChargedWeapon, Long>> rows = new ArrayList<>(s.getChargedWeaponsSpent().entrySet());
+		rows.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+		final StringBuilder sb = new StringBuilder("<html>");
+		int shown = 0;
+		for (Map.Entry<ChargedWeapon, Long> e : rows)
+		{
+			if (e.getValue() <= 0)
+			{
+				continue;
+			}
+			if (shown++ > 0)
+			{
+				sb.append("<br>");
+			}
+			sb.append(e.getKey().getLabel()).append(" — ")
+				.append(QuantityFormatter.formatNumber(e.getValue())).append(" charges — ")
+				.append(gp(e.getKey().cost(e.getValue(), priceLookup::ge)));
+		}
+		sb.append("</html>");
+		return shown == 0 ? null : sb.toString();
 	}
 
 	/** "Adamant dart — 540 fired, 120 recovered, 420 charged" per line, most-charged first. */
@@ -2429,6 +2657,26 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			out.put(itemName(id) + " (" + id + ")", row);
 		});
 		return out;
+	}
+
+	private Map<String, Object> chargedWeaponsLog()
+	{
+		if (session == null || session.getChargedWeaponsSpent().isEmpty())
+		{
+			return null;
+		}
+		final Map<String, Object> out = new LinkedHashMap<>();
+		session.getChargedWeaponsSpent().forEach((w, charges) ->
+		{
+			if (charges > 0)
+			{
+				final Map<String, Object> row = new LinkedHashMap<>();
+				row.put("charges", charges);
+				row.put("gp", w.cost(charges, priceLookup::ge));
+				out.put(w.getLabel(), row);
+			}
+		});
+		return out.isEmpty() ? null : out;
 	}
 
 	/** Per-kill loot breakdown for the session_stop line. */

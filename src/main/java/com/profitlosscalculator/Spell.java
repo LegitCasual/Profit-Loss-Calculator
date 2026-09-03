@@ -2,13 +2,14 @@
  * Copyright (c) 2026, LegitCasual
  * BSD 2-Clause License. See LICENSE.
  *
- * Standard-spellbook rune requirements. Quantities are sourced from the OSRS Wiki
- * (Standard spellbook / God spells, Aug 2026). If a spell is mispriced, fix the single
- * line here - nothing else depends on the numbers.
+ * Spell rune requirements - the standard spellbook plus the Ancient Magicks combat spells.
+ * Quantities are from the OSRS Wiki (Standard spellbook / God spells / Ancient Magicks). If
+ * a spell is mispriced, fix the single line here - nothing else depends on the numbers.
  *
- * Not covered in v1 (documented in the README): Ancient/Lunar/Arceuus spellbooks, the
- * Enchant Jewellery and Enchant Crossbow Bolt families (a submenu picks the real spell,
- * so the click cannot be attributed), and minigame/home teleports (free or fixed).
+ * Detection is manual-cast only for every spell here - autocasting is not tracked (same
+ * limitation for the standard combat spells). Not covered (documented in the README):
+ * Ancient/Lunar/Arceuus teleports, the Lunar and Arceuus spellbooks, and the Enchant
+ * Jewellery / Enchant Crossbow Bolt families (a submenu picks the real spell).
  */
 package com.profitlosscalculator;
 
@@ -107,7 +108,25 @@ enum Spell
 	CIVITAS_ILLA_FORTIS_TELEPORT(InterfaceID.MagicSpellbook.FORTIS_TELEPORT, "Civitas illa Fortis Teleport", r(EARTH, 1, FIRE, 1, LAW, 2)),
 	TELEOTHER_LUMBRIDGE(InterfaceID.MagicSpellbook.TELEOTHER_LUMBRIDGE, "Teleother Lumbridge", r(EARTH, 1, LAW, 1, SOUL, 1)),
 	TELEOTHER_FALADOR(InterfaceID.MagicSpellbook.TELEOTHER_FALADOR, "Teleother Falador", r(WATER, 1, LAW, 1, SOUL, 1)),
-	TELEOTHER_CAMELOT(InterfaceID.MagicSpellbook.TELEOTHER_CAMELOT, "Teleother Camelot", r(LAW, 1, SOUL, 2));
+	TELEOTHER_CAMELOT(InterfaceID.MagicSpellbook.TELEOTHER_CAMELOT, "Teleother Camelot", r(LAW, 1, SOUL, 2)),
+
+	// --- Ancient Magicks: combat (Ice / Blood / Smoke / Shadow, all four tiers) ---
+	ICE_RUSH(InterfaceID.MagicSpellbook.ICE_RUSH, "Ice Rush", r(WATER, 2, CHAOS, 2, DEATH, 2)),
+	ICE_BURST(InterfaceID.MagicSpellbook.ICE_BURST, "Ice Burst", r(WATER, 4, CHAOS, 4, DEATH, 2)),
+	ICE_BLITZ(InterfaceID.MagicSpellbook.ICE_BLITZ, "Ice Blitz", r(WATER, 3, BLOOD, 2, DEATH, 2)),
+	ICE_BARRAGE(InterfaceID.MagicSpellbook.ICE_BARRAGE, "Ice Barrage", r(WATER, 6, BLOOD, 2, DEATH, 4)),
+	BLOOD_RUSH(InterfaceID.MagicSpellbook.BLOOD_RUSH, "Blood Rush", r(BLOOD, 1, CHAOS, 2, DEATH, 2)),
+	BLOOD_BURST(InterfaceID.MagicSpellbook.BLOOD_BURST, "Blood Burst", r(BLOOD, 2, CHAOS, 4, DEATH, 2)),
+	BLOOD_BLITZ(InterfaceID.MagicSpellbook.BLOOD_BLITZ, "Blood Blitz", r(BLOOD, 4, DEATH, 2)),
+	BLOOD_BARRAGE(InterfaceID.MagicSpellbook.BLOOD_BARRAGE, "Blood Barrage", r(BLOOD, 4, DEATH, 4, SOUL, 1)),
+	SMOKE_RUSH(InterfaceID.MagicSpellbook.SMOKE_RUSH, "Smoke Rush", r(AIR, 1, FIRE, 1, CHAOS, 2, DEATH, 2)),
+	SMOKE_BURST(InterfaceID.MagicSpellbook.SMOKE_BURST, "Smoke Burst", r(AIR, 2, FIRE, 2, CHAOS, 4, DEATH, 2)),
+	SMOKE_BLITZ(InterfaceID.MagicSpellbook.SMOKE_BLITZ, "Smoke Blitz", r(AIR, 2, FIRE, 2, BLOOD, 2, DEATH, 2)),
+	SMOKE_BARRAGE(InterfaceID.MagicSpellbook.SMOKE_BARRAGE, "Smoke Barrage", r(AIR, 4, FIRE, 4, BLOOD, 2, DEATH, 4)),
+	SHADOW_RUSH(InterfaceID.MagicSpellbook.SHADOW_RUSH, "Shadow Rush", r(AIR, 1, CHAOS, 2, DEATH, 2, SOUL, 1)),
+	SHADOW_BURST(InterfaceID.MagicSpellbook.SHADOW_BURST, "Shadow Burst", r(AIR, 1, CHAOS, 4, DEATH, 2, SOUL, 2)),
+	SHADOW_BLITZ(InterfaceID.MagicSpellbook.SHADOW_BLITZ, "Shadow Blitz", r(AIR, 2, BLOOD, 2, DEATH, 2, SOUL, 2)),
+	SHADOW_BARRAGE(InterfaceID.MagicSpellbook.SHADOW_BARRAGE, "Shadow Barrage", r(AIR, 4, BLOOD, 2, DEATH, 4, SOUL, 3));
 
 	private final int componentId;
 	private final String displayName;

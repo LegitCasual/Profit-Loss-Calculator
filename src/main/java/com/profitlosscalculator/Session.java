@@ -6,6 +6,7 @@ package com.profitlosscalculator;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +47,10 @@ class Session
 	/** Ammo used this session: item id -&gt; {fired, recovered, net}. */
 	private Map<Integer, long[]> ammoStats = new LinkedHashMap<>();
 	private long ammoGp;
+
+	/** Charged-weapon charges spent this session: weapon -&gt; charges. */
+	private Map<ChargedWeapon, Long> chargedWeaponsSpent = new EnumMap<>(ChargedWeapon.class);
+	private long chargedWeaponGp;
 
 	/** Runes consumed by spell casts this session: rune item id -&gt; quantity. */
 	private final Map<Integer, Integer> runesUsed = new LinkedHashMap<>();
@@ -147,6 +152,19 @@ class Session
 		this.ammoGp = gp;
 	}
 
+	/** Replace the charged-weapon tally (running total, priced live off the GE). */
+	void setChargedWeapons(Map<ChargedWeapon, Long> spent, long gp)
+	{
+		this.chargedWeaponsSpent = new EnumMap<>(spent);
+		this.chargedWeaponGp = gp;
+	}
+
+	/** Never negative. */
+	long chargedWeaponTotal()
+	{
+		return Math.max(0, chargedWeaponGp);
+	}
+
 	long consumableTotal()
 	{
 		return typeTotal(CostEvent.Type.CONSUMABLE);
@@ -191,10 +209,11 @@ class Session
 		return deaths.stream().mapToLong(DeathEntry::atRiskValue).sum();
 	}
 
-	/** Total gp spent this session (supplies, spells, teleports, ammo, confirmed deaths). */
+	/** Total gp spent this session (supplies, spells, teleports, ammo, weapon charges, deaths). */
 	long total()
 	{
-		return consumableTotal() + spellTotal() + teleportTotal() + ammoTotal() + confirmedDeathTotal();
+		return consumableTotal() + spellTotal() + teleportTotal() + ammoTotal()
+			+ chargedWeaponTotal() + confirmedDeathTotal();
 	}
 
 	/**

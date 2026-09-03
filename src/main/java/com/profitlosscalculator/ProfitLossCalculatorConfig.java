@@ -128,6 +128,18 @@ public interface ProfitLossCalculatorConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "trackChargedWeapons",
+		name = "Track charged weapons",
+		description = "Charge for a charged weapon's recharge material as its charges are spent: Venator bow (ancient essence), Eye of Ayak (demon tears), Tumeken's shadow (soul + chaos runes).",
+		section = extrasSection,
+		position = 2
+	)
+	default boolean trackChargedWeapons()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "trackLoot",
 		name = "Track loot",
 		description = "Count monster drops, PvP kills, reward chests and pickpockets as income. Needs RuneLite's built-in Loot Tracker plugin enabled (it is by default).",

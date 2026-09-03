@@ -91,7 +91,9 @@ Sections with nothing in them are hidden.
   bag, so they're collected immediately.
 - **Ground pickups** - items you take off the ground (or telekinetic-grab) that aren't
   already credited to one of your kills. Picking up something you dropped yourself is not
-  counted - the plugin remembers what you drop and matches it back.
+  counted - the plugin remembers what you drop and matches it back. Runes that go straight
+  into your rune pouch on pickup are seen too (the pouch is read alongside inventory and
+  worn gear).
 - **High Alchemy** - the coins a High Alch cast produces are booked as income (the rune
   cost is charged separately, so the row nets out to the real alch profit). Alching while
   fighting counts toward that mob; otherwise it collects in a "High alch" line.
@@ -109,13 +111,19 @@ last week's prices keeps last week's values.
 - **Consumables** - every `Eat` / `Drink` click at GE value; a dosed potion is charged the
   drop in value from one dose to the next (an empty vial for the last sip) when
   *Dose-aware potion cost* is on.
-- **Spells** - standard-spellbook casts, priced as the GE value of the runes needed minus
-  any rune supplied by an equipped staff/tome.
+- **Spells** - standard-spellbook casts and the Ancient Magicks combat spells (Ice / Blood
+  / Smoke / Shadow, all tiers), priced as the GE value of the runes needed minus any rune
+  supplied by an equipped staff/tome (a Kodai frees the water on Ice spells, etc.). Only
+  **manual** casts are counted - autocasting is not detected.
 - **Teleports** - charged jewellery (glory, ring of dueling, games necklace, ...) priced
   per charge, and teleport tablets/scrolls at GE value.
 - **Ammo** - arrows, bolts, darts, thrown weapons, chinchompas and cannonballs that leave
   your possession, split into fired / recovered / charged. Ava's recovery and cannon
   pickup are not charged.
+- **Charged weapons** - the recharge material spent per attack, priced live: **Venator bow**
+  (ancient essence), **Eye of Ayak** (demon tears), **Tumeken's shadow** (soul + chaos
+  runes). Counted from the attack animation - one attack, one charge - so autocasting counts
+  and recharging never looks like use.
 - **Deaths** - a pending entry the moment you die. When the lost items come back the
   plugin reads the Death's Office fee from chat (or estimates it from the modern
   Item Retrieval tiers) and you confirm or zero it (gravestone) in the panel. Never
@@ -147,10 +155,17 @@ Files under `.runelite/profit-loss-calculator/`:
   picked up much later (full inventory, came back for it) may stay counted as potential
   only unless you click Take on it. Alching during a fight can briefly inflate collected
   coins up to - but never past - what actually dropped.
-- Ancient / Lunar / Arceuus spellbooks and Enchant spells are not priced.
-- Charged weapons (blowpipe darts + scales, trident, sanguinesti, shadow) are not tracked.
-- The rune *pouch* is not inspected - pouch runes are consumed and still cost gp; only
-  equipped staves/tomes remove a rune from the bill.
+- Only **manually cast** spells are counted - autocasting (standard or Ancient) is not
+  detected, so an autocast barrage/blitz task shows no spell cost.
+- Ancient teleports, the Lunar and Arceuus spellbooks, and Enchant spells are not priced.
+- A Kodai wand's 15% "save a rune" proc is not modelled - Ice-spell water is simply free.
+- Charged weapons: only the Venator bow, Eye of Ayak and Tumeken's shadow are priced. The
+  blowpipe (darts + scales), tridents, Sanguinesti staff, crystal weapons (untradeable
+  shards) and the wilderness weapons are not - the recharge economy for several is unclear
+  in the current wiki data.
+- For **spell cost**, runes in the pouch are still charged in full - only equipped
+  staves/tomes remove a rune from the bill. (The pouch *is* read for income, so runes
+  picked up into it count.)
 - Ammo "fired" is what left the quiver - Ava's-recovered shots never register.
 - A targeted farm matches the mob name **exactly** (case-insensitive). Multi-part bosses
   whose name changes between phases, or where two die close together with a single loot
