@@ -1,8 +1,9 @@
 # Profit Loss Calculator
 
 A RuneLite plugin that measures **profit and loss** - loot and ground pickups coming in,
-supplies / spells / teleports / ammo / deaths going out - either for a whole play session
-or per kill of one mob you name, with a lifetime per-mob history and a JSON Lines event log.
+supplies / spells / teleports / ammo / deaths going out - for a whole play session, per kill
+of one mob you name, or for your current Slayer task, with a lifetime per-mob history and a
+JSON Lines event log.
 
 Income is split two ways:
 
@@ -13,23 +14,31 @@ Income is split two ways:
 `Net = collected − cost`. The gap between potential and collected is what you left on the
 floor. (Turn on *Count uncollected drops* to make the full drop count instead.)
 
-## Two modes
+## Three modes
 
-There are two ways to track, one at a time:
+There are three ways to track, one at a time:
 
 - **Session** - a flat "record my profit / loss for this stretch of time" run. Loot in,
   supplies out, one net number on the tab. Behind the scenes it still splits per mob and
   feeds that into the History tab.
-- **Targeted farm** - you type **one** mob name and every kill of it is tracked
-  individually. Every cost you incur while the farm runs is charged to that mob, so you get
-  a real **GP per kill**. Anything else you kill shows under *Other income* and is not part
-  of the net.
+- **Boss Target Farm** - you type a mob name and every kill of it is tracked individually,
+  giving you a real **GP per kill**. You can add more names to the same farm at any point
+  without stopping - each one gets its own block with its own net and gain icon grid, stacked
+  under a combined farm total, with one combined per-kill list at the bottom once you're
+  farming more than one. Anything you kill that was never added to the farm shows under
+  *Other income* and is not part of the net.
+- **Slayer** - auto-detects your current Slayer task (name, location, kills remaining) and
+  tracks every kill of every mob that counts toward it - aliases, superiors and boss tasks
+  included, the same matching RuneLite's own built-in Slayer plugin uses. Getting reassigned
+  to a new task doesn't stop the run; it just folds the new task's mobs in, so one Slayer
+  run can span several tasks back to back. Needs the built-in **Slayer** plugin enabled (it
+  is by default).
 
 ### Panel layout
 
-Three tabs: **Session**, **Targeted**, **History**.
+A **History** button sits above a dropdown that switches between the three tracking modes.
 
-**Session tab**
+**Session**
 
 - **Start / Pause / Resume** - one button that flips with the state. Pausing stops all
   accrual (banking / afk); resuming re-bases the trackers. **Stop** finalises,
@@ -41,23 +50,41 @@ Three tabs: **Session**, **Targeted**, **History**.
   *Show cost list* in the config).
 - **Deaths** - a row per death awaiting a fee / gravestone decision.
 
-**Targeted tab**
+**Boss Target Farm**
 
-- Type a mob name, **Start farm**. While it runs: **Pause / Resume**, **Stop**, **Restart**
-  (restarts the same mob).
-- **Summary block** - Net, **GP/kill**, Gains, Losses, gp/hr.
-- **Per kill** - a row per kill (`#37  14:32   +12,400`), hover for that kill's drops.
-- **Other income** - loot from anything else you killed during the farm, grouped by source.
-  Shown for context; never part of the net.
+- Type a mob name, **Start farm**. While it runs, the same field relabels to **Add mob** -
+  keep typing names and adding them to grow the farm; **Pause / Resume**, **Stop**, **Restart**
+  (brings back every target the farm had).
+- **Summary block** - the combined total across every target: Net, **GP/kill**, Gains, Losses,
+  gp/hr.
+- **Per boss** - only shown once you've added more than one target: one block per mob, each
+  with its own net, kills, GP/kill and its own gain icon grid. Losses stay a farm-wide figure
+  here - cost isn't tracked at the item level per mob, only as a total.
+- **Per kill** - a row per kill (`#37  14:32   +12,400`), hover for that kill's drops; shows
+  the mob's name per row once you're farming more than one target.
+- **Other income** - loot from anything you killed that was never added to the farm, grouped
+  by source. Shown for context; never part of the net.
 - **Costs** (with *Show cost list*) and **Deaths**.
 
 The name match is exact and case-insensitive. A mob that never fires a death event still
 counts - its loot is taken as the kill signal.
 
-**History tab**
+**Slayer**
 
-Every run - plain session **and** targeted farm - feeds this, and its mobs merge by name:
-a mob you fought across three sessions and one farm is one tidy row.
+- Shows the currently detected task (name, location, kills left) as soon as you have one -
+  no typing required. **Start tracking**, then **Pause / Resume**, **Stop**, **Restart**
+  while it runs.
+- **Summary block** - Net, **GP/kill**, Gains, Losses, gp/hr, average kill time.
+- **Per kill** - like Targeted, but each row also carries the mob's name, since a task can
+  span several species.
+- **Other income**, **Costs**, **Deaths** - same as Targeted. A stray kill that never
+  matched the task shows under *Other income* only.
+
+**History**
+
+Every run - plain session, targeted farm **and** Slayer task - feeds this, and its mobs
+merge by name: a mob you fought across three sessions, one farm and a Slayer task is one
+tidy row.
 
 - **Lifetime** net, total gained vs total cost, kills, run count.
 - One **box per mob**, sorted by net (biggest earner first): a header (`Brutus ×426`,
@@ -70,11 +97,12 @@ a mob you fought across three sessions and one farm is one tidy row.
 
 ### Per-mob cost attribution
 
-In a plain session, each supply, spell, teleport, ammo charge and death is charged to
-**whichever NPC you were fighting** at that moment (kept sticky for a few seconds after the
-last hit, so tank-eating right after a kill still counts). In a targeted farm everything
-goes to the target regardless. It's best-effort - drink a potion while running between packs
-and it lands in "Not in combat".
+In every mode, each supply, spell, teleport, ammo charge and death is charged to **whichever
+NPC you were fighting** at that moment (kept sticky for a few seconds after the last hit, so
+tank-eating right after a kill still counts). It's best-effort - drink a potion while running
+between packs and it lands in "Not in combat". In a Boss Target Farm, cost incurred fighting
+something that isn't one of the farm's targets also lands in "Not in combat" rather than being
+credited to any one boss - the farm's overall Net still includes it either way.
 
 Sections with nothing in them are hidden.
 
@@ -142,7 +170,7 @@ Files under `.runelite/profit-loss-calculator/`:
   reads and merges. On first run older schema lines are upgraded in place and the original
   is kept as `history-v1-backup.jsonl`.
 - **`session-<timestamp>.jsonl`** (with *Write session log file* enabled) - the detailed
-  event stream for both modes: session start/pause/resume/stop, consumable, spell,
+  event stream for all three modes: session start/pause/resume/stop, consumable, spell,
   teleport, kill, loot, death pending/returned/resolved. The `session_stop` line carries
   the full summary, a per-kill breakdown and the per-mob rollup.
 
@@ -167,11 +195,22 @@ Files under `.runelite/profit-loss-calculator/`:
   staves/tomes remove a rune from the bill. (The pouch *is* read for income, so runes
   picked up into it count.)
 - Ammo "fired" is what left the quiver - Ava's-recovered shots never register.
-- A targeted farm matches the mob name **exactly** (case-insensitive). Multi-part bosses
-  whose name changes between phases, or where two die close together with a single loot
-  event, can miscount a kill despite the short debounce.
-- A targeted farm's net is the target only. Stray loot shows under *Other income* but is
-  not netted, and skilling / clue steps done mid-farm are not counted.
+- A Boss Target Farm matches each target's name **exactly** (case-insensitive). Multi-part
+  bosses whose name changes between phases, or where two die close together with a single
+  loot event, can miscount a kill despite the short debounce.
+- A Boss Target Farm's net only includes its targets. Stray loot shows under *Other income*
+  but is not netted, and skilling / clue steps done mid-farm are not counted.
+- A farm's per-boss blocks only show a **gain** icon grid - the loss grid stays a farm-wide
+  figure, since cost is tracked as a gp total per mob, not per item per mob.
+- Slayer task detection relies entirely on RuneLite's own built-in **Slayer** plugin (task
+  name/location/progress and which spawned NPCs count for it) - if that plugin is disabled,
+  the Slayer tab just shows "No task detected". Task-mob matching is built up live from
+  NPCs actually seen while the run is active, so a species belonging to your task that never
+  spawns near you won't be recognised until it does.
+- A Slayer run's net only includes mobs that have matched the task at some point during the
+  run; a stray kill shows under *Other income* but is not netted, same as a targeted farm.
+  Getting reassigned mid-run doesn't stop tracking - the new task's mobs are simply folded
+  in, so History's per-mob rows can span more than one task assignment within a single run.
 
 ## Build
 

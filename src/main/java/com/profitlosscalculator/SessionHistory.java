@@ -598,8 +598,9 @@ class SessionHistory
 						agg[2] += it.length >= 3 ? it[2] : 0;
 					}
 				}
-				// only farm runs (one mob) can attribute their wall-clock time to a kill rate
-				if ("farm".equals(e.getKind()) && mr.getKills() > 0)
+				// farm and slayer runs can attribute their wall-clock time to a kill rate; a
+				// plain session mixes in too much unrelated downtime to be a fair per-kill time
+				if (("farm".equals(e.getKind()) || "slayer".equals(e.getKind())) && mr.getKills() > 0)
 				{
 					a.farmSec += e.getDurationSec();
 					a.farmKills += mr.getKills();

@@ -10,6 +10,7 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.GridLayout;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -150,7 +151,8 @@ final class PanelUi
 		return row;
 	}
 
-	/** "#37  14:32" left, that kill's collected value right, items in the tooltip. */
+	/** "#37  14:32" left (plus the mob name, for a Slayer run's multi-species list), that
+	 *  kill's collected value right, items in the tooltip. */
 	static JPanel killRow(ProfitLossCalculatorPanel.KillRow k)
 	{
 		final JPanel row = new JPanel(new BorderLayout(4, 0));
@@ -159,7 +161,9 @@ final class PanelUi
 			BorderFactory.createMatteBorder(0, 3, 0, 0, k.getCollected() >= 0 ? GAIN_COLOR : LOSS_COLOR),
 			BorderFactory.createEmptyBorder(2, 5, 2, 5)));
 
-		final JLabel left = new JLabel("#" + k.getIndex() + "   " + k.getTime());
+		final String label = "#" + k.getIndex() + "   " + k.getTime()
+			+ (k.getMobName() == null || k.getMobName().isEmpty() ? "" : "   " + k.getMobName());
+		final JLabel left = new JLabel(label);
 		left.setFont(FontManager.getRunescapeSmallFont());
 		final JLabel right = new JLabel(sign(k.getCollected()));
 		right.setFont(FontManager.getRunescapeSmallFont());
@@ -175,6 +179,59 @@ final class PanelUi
 		row.add(left, BorderLayout.CENTER);
 		row.add(right, BorderLayout.EAST);
 		return row;
+	}
+
+	/** One target mob's block in a multi-target Boss Target Farm: name/kills header, net
+	 *  right-aligned and coloured, a "gained X · cost Y" sub-line, gp/kill, and that mob's own
+	 *  gain icon grid (losses stay a farm-wide figure - cost isn't tracked per item per mob). */
+	static JPanel mobFarmBlock(ProfitLossCalculatorPanel.MobFarmBlock mb, ItemManager itemManager)
+	{
+		final Color accent = mb.getNet() >= 0 ? GAIN_COLOR : LOSS_COLOR;
+
+		final JPanel box = new JPanel(new BorderLayout());
+		box.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		box.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createMatteBorder(0, 3, 0, 0, accent),
+			BorderFactory.createEmptyBorder(4, 6, 6, 6)));
+
+		final JPanel line1 = new JPanel(new BorderLayout(6, 0));
+		line1.setOpaque(false);
+		final JLabel name = new JLabel(mb.getMobName()
+			+ (mb.getKills() > 0 ? "  ×" + QuantityFormatter.formatNumber(mb.getKills()) : ""));
+		final JLabel net = new JLabel(sign(mb.getNet()));
+		net.setForeground(accent);
+		net.setHorizontalAlignment(SwingConstants.RIGHT);
+		line1.add(name, BorderLayout.CENTER);
+		line1.add(net, BorderLayout.EAST);
+
+		final String sub1 = "gained " + gpPlain(mb.getGains())
+			+ (mb.getLosses() > 0 ? "  ·  cost " + gpPlain(mb.getLosses()) : "");
+		final String sub2 = mb.getKills() > 0 ? sign(mb.getGpPerKill()) + "/kill" : "No kills yet";
+
+		final JPanel head = new JPanel(new BorderLayout());
+		head.setOpaque(false);
+		head.add(line1, BorderLayout.NORTH);
+		head.add(smallGrey(sub1), BorderLayout.CENTER);
+		head.add(smallGrey(sub2), BorderLayout.SOUTH);
+		box.add(head, BorderLayout.NORTH);
+
+		if (!mb.getGainItems().isEmpty())
+		{
+			final JPanel icons = new JPanel(new GridLayout(0, GRID_COLS, 1, 1));
+			icons.setOpaque(false);
+			icons.setBorder(BorderFactory.createEmptyBorder(5, 0, 0, 0));
+			fillGrid(icons, mb.getGainItems(), GAIN_CELL, itemManager);
+			box.add(icons, BorderLayout.CENTER);
+		}
+		return box;
+	}
+
+	private static JLabel smallGrey(String text)
+	{
+		final JLabel l = new JLabel(text);
+		l.setFont(FontManager.getRunescapeSmallFont());
+		l.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		return l;
 	}
 
 	static JPanel deathRow(ProfitLossCalculatorPanel.DeathRow d, ProfitLossCalculatorPanel.Controls controls)

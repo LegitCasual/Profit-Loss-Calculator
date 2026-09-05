@@ -319,11 +319,11 @@ class HistoryContent extends JPanel
 
 		final JPanel left = new JPanel(new BorderLayout());
 		left.setOpaque(false);
-		final JLabel l1 = new JLabel(when(r.getStart()) + "  ·  "
-			+ ("farm".equals(r.getKind()) ? "farm" : "session"));
+		final JLabel l1 = new JLabel(when(r.getStart()) + "  ·  " + runKindLabel(r.getKind()));
 		l1.setFont(FontManager.getRunescapeSmallFont());
 		left.add(l1, BorderLayout.NORTH);
-		final boolean rate = "farm".equals(r.getKind()) && r.getKills() > 0 && r.getDurationSec() > 0;
+		final boolean rate = ("farm".equals(r.getKind()) || "slayer".equals(r.getKind()))
+			&& r.getKills() > 0 && r.getDurationSec() > 0;
 		left.add(small((r.getKills() > 0 ? QuantityFormatter.formatNumber(r.getKills()) + " kills  ·  " : "")
 			+ dur(r.getDurationSec())
 			+ (rate ? "  ·  ~" + PanelUi.secs(r.getDurationSec() / r.getKills()) + "/kill" : "")),
@@ -447,6 +447,19 @@ class HistoryContent extends JPanel
 	private static String label(String name)
 	{
 		return name == null || name.isEmpty() ? NOT_IN_COMBAT : name;
+	}
+
+	private static String runKindLabel(String kind)
+	{
+		if ("farm".equals(kind))
+		{
+			return "farm";
+		}
+		if ("slayer".equals(kind))
+		{
+			return "slayer task";
+		}
+		return "session";
 	}
 
 	private static String when(String iso)

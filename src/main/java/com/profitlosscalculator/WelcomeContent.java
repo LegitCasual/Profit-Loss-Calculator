@@ -56,7 +56,7 @@ class WelcomeContent extends JPanel
 
 		final JLabel body = html(
 			"Thanks for testing this early build. It tracks the profit and loss of a play "
-			+ "session, or of a targeted farm of one mob you name.<br><br>"
+			+ "session, a targeted farm of one mob you name, or your current Slayer task.<br><br>"
 			+ "Working out gp in RuneScape is fiddly, so expect rough edges - especially "
 			+ "around deaths, High Alchemy and multi-phase bosses. The README covers what "
 			+ "is and isn't counted.");

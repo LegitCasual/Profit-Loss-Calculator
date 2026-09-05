@@ -50,7 +50,7 @@ public interface ProfitLossCalculatorConfig extends Config
 	@ConfigItem(
 		keyName = "showIncomeList",
 		name = "Show income list (Session tab)",
-		description = "On the Session tab, also show income grouped one row per source. The Targeted tab always shows its 'Other income'.",
+		description = "On the Session tab, also show income grouped one row per source. The Boss Target Farm tab always shows its 'Other income'.",
 		position = 4
 	)
 	default boolean showIncomeList()
@@ -135,6 +135,18 @@ public interface ProfitLossCalculatorConfig extends Config
 		position = 2
 	)
 	default boolean trackChargedWeapons()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "trackSlayerTask",
+		name = "Detect Slayer tasks",
+		description = "Auto-detect your current Slayer task for the Slayer tab, and count kills/loot for every mob that matches it. Needs RuneLite's built-in Slayer plugin enabled (it is by default).",
+		section = extrasSection,
+		position = 3
+	)
+	default boolean trackSlayerTask()
 	{
 		return true;
 	}

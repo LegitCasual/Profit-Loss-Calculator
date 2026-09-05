@@ -5,40 +5,36 @@
 package com.profitlosscalculator;
 
 import java.awt.BorderLayout;
-import java.awt.Component;
-import java.awt.Dimension;
-import java.awt.Font;
-import java.awt.GridLayout;
+import java.awt.CardLayout;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
-import javax.swing.JLabel;
+import javax.swing.JComboBox;
 import javax.swing.JPanel;
 import lombok.Builder;
 import lombok.Singular;
 import lombok.Value;
 import net.runelite.client.game.ItemManager;
-import net.runelite.client.ui.ColorScheme;
-import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
-import net.runelite.client.ui.components.materialtabs.MaterialTab;
-import net.runelite.client.ui.components.materialtabs.MaterialTabGroup;
 
 /**
- * Sidebar panel with three tabs:
+ * Sidebar panel. A History button sits above a dropdown that picks between the three tracking
+ * modes:
  *
  * <ul>
  *     <li><b>Session</b> - a flat "record my profit / loss for this stretch of time" run.
  *         Net, gp/hr and two item grids (green picked up, red consumed), plus optional
- *         income / cost lists and any unresolved deaths.</li>
+ *         income / cost lists and any unresolved deaths (see {@link SessionContent}).</li>
  *     <li><b>Targeted</b> - type one mob, Start, and track a clean per-kill ledger for just
  *         that mob (see {@link TargetedContent}).</li>
- *     <li><b>History</b> - the lifetime, per-mob record of targeted farms
- *         (see {@link HistoryContent}).</li>
+ *     <li><b>Slayer</b> - auto-detects the current Slayer task and tracks a per-kill ledger
+ *         for every mob that matches it (see {@link SlayerContent}).</li>
  * </ul>
  *
- * Only one run (session or farm) is active at a time.
+ * The History button swaps the whole mode view out for the lifetime, per-mob record of every
+ * run (see {@link HistoryContent}); clicking it again ("◀  Back") returns to whichever mode
+ * was selected. Only one run (session, farm or Slayer task) is active at a time.
  */
 class ProfitLossCalculatorPanel extends PluginPanel
 {
@@ -49,6 +45,12 @@ class ProfitLossCalculatorPanel extends PluginPanel
 
 		/** Targeted-tab start button: begin a farm of {@code mob}. */
 		void onStartFarm(String mob);
+
+		/** Targeted-tab "Add mob" button: grow the current farm's target group. */
+		void onAddTargetMob(String mob);
+
+		/** Slayer-tab start button: begin tracking the currently detected task. */
+		void onStartSlayer();
 
 		void onStop();
 
@@ -92,7 +94,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		String tooltip;
 	}
 
-	/** One kill in a targeted farm. */
+	/** One kill in a Targeted farm or Slayer task. */
 	@Value
 	static class KillRow
 	{
@@ -101,6 +103,9 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		long collected;
 		long dropped;
 		String tooltip;
+		/** The mob's name - populated for Slayer (several species can appear), blank for
+		 *  Targeted (redundant - it's always the one farmed mob). */
+		String mobName;
 	}
 
 	@Value
@@ -113,6 +118,20 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		boolean returned;
 	}
 
+	/** One target mob's own block in a multi-target Boss Target Farm - only rendered when the
+	 *  farm has more than one target (a single-target farm looks exactly like it always has). */
+	@Value
+	static class MobFarmBlock
+	{
+		String mobName;
+		int kills;
+		long net;
+		long gains;
+		long losses;
+		long gpPerKill;
+		List<GridItem> gainItems;
+	}
+
 	@Value
 	@Builder
 	static class View
@@ -120,9 +139,16 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		boolean active;
 		boolean paused;
 		boolean finished;
-		boolean targeted;
 		@Builder.Default
-		String targetMob = "";
+		Session.RunMode mode = Session.RunMode.SESSION;
+		/** Live-detected Slayer task info - populated even when idle, so the Slayer tab can
+		 *  preview the current task before Start is pressed. */
+		@Builder.Default
+		String slayerTaskName = "";
+		@Builder.Default
+		String slayerTaskLocation = "";
+		int slayerInitialAmount;
+		int slayerRemainingAmount;
 		@Builder.Default
 		String state = "";
 		@Builder.Default
@@ -134,7 +160,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		long net;
 		long netPerHour;
 		long gpPerKill;
-		/** Targeted farm: run seconds / kills - the average time per kill. */
+		/** Targeted farm / Slayer task: run seconds / kills - the average time per kill. */
 		long secPerKill;
 		long potential;
 		long atRisk;
@@ -152,135 +178,86 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		List<EventLine> costEvents;
 		@Singular
 		List<DeathRow> deaths;
+		/** One entry per target mob in a Targeted farm, in add-order - empty for Session/Slayer
+		 *  and for a single-target farm (which just uses the regular summary/grids as-is). */
+		@Singular
+		List<MobFarmBlock> mobBlocks;
+
+		boolean isTargeted()
+		{
+			return mode == Session.RunMode.TARGETED;
+		}
+
+		boolean isSlayer()
+		{
+			return mode == Session.RunMode.SLAYER;
+		}
+
+		/** True for either grouped mode (Targeted or Slayer) - has a per-kill bucket and an
+		 *  "Other income" split, as opposed to a plain session where everything just counts. */
+		boolean isGrouped()
+		{
+			return mode != Session.RunMode.SESSION;
+		}
 	}
+
+	private static final String MODE_SESSION = "Session";
+	private static final String MODE_TARGETED = "Boss Target Farm";
+	private static final String MODE_SLAYER = "Slayer";
+	private static final String CARD_MODES = "modes";
+	private static final String CARD_HISTORY = "history";
 
 	private final Controls controls;
 
-	private final JButton primaryBtn = new JButton("Start session");
-	private final JButton stopBtn = new JButton("Stop");
-	private final JButton restartBtn = new JButton("Restart");
-	private final JPanel secondaryRow = new JPanel(new GridLayout(1, 2, 4, 0));
+	private final JButton historyBtn = new JButton("History");
+	private final JComboBox<String> modeSelector = new JComboBox<>(new String[]{MODE_SESSION, MODE_TARGETED, MODE_SLAYER});
+	private final CardLayout modeLayout = new CardLayout();
+	private final JPanel modeHost = new JPanel(modeLayout);
+	private final CardLayout bodyLayout = new CardLayout();
+	private final JPanel bodyHost = new JPanel(bodyLayout);
+	private boolean showingHistory;
 
-	private final JLabel titleLabel = new JLabel();
-	private final JLabel killsLabel = new JLabel();
-	private final JLabel noSessionLabel = new JLabel("No session");
-	private final JPanel statGrid = new JPanel(new GridLayout(0, 2, 8, 1));
-	private final JPanel gainGrid = new JPanel(new GridLayout(0, PanelUi.GRID_COLS, 2, 2));
-	private final JPanel lossGrid = new JPanel(new GridLayout(0, PanelUi.GRID_COLS, 2, 2));
-
-	private final JPanel incomeSection = new JPanel();
-	private final JPanel incomePanel = new JPanel();
-	private final JPanel costSection = new JPanel();
-	private final JPanel costPanel = new JPanel();
-	private final JPanel deathsSection = new JPanel();
-	private final JPanel deathsPanel = new JPanel();
-
-	private final ItemManager itemManager;
+	private final SessionContent sessionContent;
 	private final TargetedContent targetedContent;
+	private final SlayerContent slayerContent;
 	private final HistoryContent historyContent;
 
-	/** Holds the tabs + tab content. Swapped out for {@link #welcome} on first run. */
+	/** Holds the nav bar + body. Swapped out for {@link #welcome} on first run. */
 	private final JPanel contentHost = new JPanel(new BorderLayout());
 	private final WelcomeContent welcome;
 
 	ProfitLossCalculatorPanel(Controls controls, ItemManager itemManager, boolean showWelcome)
 	{
 		this.controls = controls;
-		this.itemManager = itemManager;
+		this.sessionContent = new SessionContent(controls, itemManager);
 		this.targetedContent = new TargetedContent(controls, itemManager);
+		this.slayerContent = new SlayerContent(controls, itemManager);
 		this.historyContent = new HistoryContent(controls, itemManager);
 
 		setLayout(new BorderLayout());
 
-		primaryBtn.setFocusPainted(false);
-		primaryBtn.addActionListener(e -> controls.onStartPauseResume());
-		stopBtn.setFocusPainted(false);
-		restartBtn.setFocusPainted(false);
-		stopBtn.addActionListener(e -> controls.onStop());
-		restartBtn.addActionListener(e -> controls.onRestart());
-		secondaryRow.add(stopBtn);
-		secondaryRow.add(restartBtn);
+		historyBtn.setFocusPainted(false);
+		historyBtn.addActionListener(e -> toggleHistory());
 
-		final JPanel north = new JPanel();
-		north.setLayout(new BoxLayout(north, BoxLayout.Y_AXIS));
-		north.add(PanelUi.stretch(primaryBtn));
-		north.add(PanelUi.vgap(4));
-		north.add(PanelUi.stretch(secondaryRow));
+		modeSelector.setFocusable(false);
+		modeSelector.addActionListener(e -> modeLayout.show(modeHost, (String) modeSelector.getSelectedItem()));
 
-		final JPanel summary = new JPanel();
-		summary.setLayout(new BoxLayout(summary, BoxLayout.Y_AXIS));
-		summary.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(1, 0, 1, 0, ColorScheme.MEDIUM_GRAY_COLOR),
-			BorderFactory.createEmptyBorder(6, 0, 8, 0)));
+		final JPanel navBar = new JPanel();
+		navBar.setLayout(new BoxLayout(navBar, BoxLayout.Y_AXIS));
+		navBar.setBorder(BorderFactory.createEmptyBorder(8, 10, 4, 10));
+		navBar.add(PanelUi.stretch(historyBtn));
+		navBar.add(PanelUi.vgap(4));
+		navBar.add(PanelUi.stretch(modeSelector));
 
-		titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD));
-		killsLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		killsLabel.setFont(FontManager.getRunescapeSmallFont());
-		final JPanel titleRow = new JPanel(new BorderLayout());
-		titleRow.setOpaque(false);
-		titleRow.add(titleLabel, BorderLayout.WEST);
-		titleRow.add(killsLabel, BorderLayout.EAST);
+		modeHost.add(sessionContent, MODE_SESSION);
+		modeHost.add(targetedContent, MODE_TARGETED);
+		modeHost.add(slayerContent, MODE_SLAYER);
 
-		noSessionLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		noSessionLabel.setFont(FontManager.getRunescapeSmallFont());
+		bodyHost.add(modeHost, CARD_MODES);
+		bodyHost.add(historyContent, CARD_HISTORY);
 
-		statGrid.setOpaque(false);
-		statGrid.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		summary.add(PanelUi.stretch(titleRow));
-		summary.add(PanelUi.vgap(4));
-		summary.add(statGrid);
-		summary.add(PanelUi.stretch(noSessionLabel));
-		summary.add(PanelUi.vgap(6));
-		summary.add(gainGrid);
-		summary.add(PanelUi.vgap(3));
-		summary.add(lossGrid);
-
-		final JPanel center = new JPanel();
-		center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
-		center.add(summary);
-		center.add(PanelUi.vgap(8));
-
-		incomePanel.setLayout(new BoxLayout(incomePanel, BoxLayout.Y_AXIS));
-		section(incomeSection, "Income", incomePanel);
-		costPanel.setLayout(new BoxLayout(costPanel, BoxLayout.Y_AXIS));
-		section(costSection, "Costs", costPanel);
-		deathsPanel.setLayout(new BoxLayout(deathsPanel, BoxLayout.Y_AXIS));
-		section(deathsSection, "Deaths", deathsPanel);
-
-		center.add(incomeSection);
-		center.add(costSection);
-		center.add(deathsSection);
-
-		final JPanel currentStack = new JPanel();
-		currentStack.setLayout(new BoxLayout(currentStack, BoxLayout.Y_AXIS));
-		currentStack.add(north);
-		currentStack.add(PanelUi.vgap(6));
-		currentStack.add(center);
-
-		final JPanel sessionContent = new JPanel(new BorderLayout());
-		sessionContent.setBorder(BorderFactory.createEmptyBorder(8, 10, 10, 10));
-		sessionContent.add(currentStack, BorderLayout.NORTH);
-
-		final JPanel display = new JPanel(new BorderLayout());
-		final MaterialTabGroup tabs = new MaterialTabGroup(display);
-		tabs.setBorder(BorderFactory.createEmptyBorder(5, 0, 0, 0));
-		final MaterialTab sessionTab = new MaterialTab("Session", tabs, sessionContent);
-		final MaterialTab targetedTab = new MaterialTab("Targeted", tabs, targetedContent);
-		final MaterialTab historyTab = new MaterialTab("History", tabs, historyContent);
-		// opening the History tab re-reads history.jsonl from disk and re-lays the panel -
-		// covers a first render that happened before the client (or the tab) was ready
-		historyTab.setOnSelectEvent(() ->
-		{
-			controls.onRefreshHistory();
-			return true;
-		});
-		tabs.addTab(sessionTab);
-		tabs.addTab(targetedTab);
-		tabs.addTab(historyTab);
-		contentHost.add(tabs, BorderLayout.NORTH);
-		contentHost.add(display, BorderLayout.CENTER);
-		tabs.select(sessionTab);
+		contentHost.add(navBar, BorderLayout.NORTH);
+		contentHost.add(bodyHost, BorderLayout.CENTER);
 
 		welcome = new WelcomeContent(this::dismissWelcome);
 		add(showWelcome ? welcome : contentHost, BorderLayout.CENTER);
@@ -288,7 +265,22 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		render(View.builder().build());
 	}
 
-	/** Leave the first-run screen for good and reveal the tabs. */
+	/** History button flip: "History" navigates to the lifetime record, "◀  Back" returns to
+	 *  whichever tracking mode is selected in the dropdown. Mirrors the exact swap technique
+	 *  {@link #dismissWelcome} uses for the first-run screen. */
+	private void toggleHistory()
+	{
+		showingHistory = !showingHistory;
+		historyBtn.setText(showingHistory ? "◀  Back" : "History");
+		modeSelector.setVisible(!showingHistory);
+		if (showingHistory)
+		{
+			controls.onRefreshHistory();
+		}
+		bodyLayout.show(bodyHost, showingHistory ? CARD_HISTORY : CARD_MODES);
+	}
+
+	/** Leave the first-run screen for good and reveal the panel. */
 	private void dismissWelcome()
 	{
 		if (welcome.getParent() == null)
@@ -302,15 +294,6 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		controls.onWelcomeDismissed();
 	}
 
-	private static void section(JPanel holder, String title, JPanel body)
-	{
-		holder.setLayout(new BoxLayout(holder, BoxLayout.Y_AXIS));
-		holder.setAlignmentX(Component.LEFT_ALIGNMENT);
-		holder.add(PanelUi.sectionLabel(title));
-		holder.add(body);
-		holder.add(PanelUi.vgap(10));
-	}
-
 	void renderHistory(SessionHistory.Snapshot lifetime, java.util.Map<Integer, String> itemNames)
 	{
 		historyContent.render(lifetime, itemNames);
@@ -318,85 +301,8 @@ class ProfitLossCalculatorPanel extends PluginPanel
 
 	void render(View view)
 	{
+		sessionContent.render(view);
 		targetedContent.render(view);
-
-		final boolean farmActive = view.isTargeted() && view.isActive();
-		final boolean sessionRunning = !view.isTargeted() && view.isActive();
-		final boolean sessionShowing = !view.isTargeted() && (view.isActive() || view.isFinished());
-
-		primaryBtn.setEnabled(!farmActive);
-		primaryBtn.setText(farmActive ? "Farm running"
-			: !sessionRunning ? "Start session"
-			: view.isPaused() ? "Resume" : "Pause");
-		primaryBtn.setBackground(farmActive ? ColorScheme.MEDIUM_GRAY_COLOR
-			: !sessionRunning || view.isPaused() ? ColorScheme.PROGRESS_COMPLETE_COLOR
-			: ColorScheme.PROGRESS_INPROGRESS_COLOR);
-		secondaryRow.setVisible(sessionRunning);
-
-		titleLabel.setText("Session" + (sessionShowing && !view.getState().isEmpty() ? "  ·  " + view.getState() : ""));
-		killsLabel.setText(sessionShowing && view.getKills() > 0
-			? view.getKills() + " kill" + (view.getKills() == 1 ? "" : "s")
-			: "");
-
-		statGrid.removeAll();
-		statGrid.setVisible(sessionShowing);
-		noSessionLabel.setVisible(!sessionShowing);
-		noSessionLabel.setText(farmActive
-			? "A targeted farm is running - see the Targeted tab"
-			: "No session");
-
-		if (sessionShowing)
-		{
-			statGrid.add(PanelUi.statCell("Net", PanelUi.sign(view.getNet()),
-				view.getNet() >= 0 ? PanelUi.GAIN_COLOR : PanelUi.LOSS_COLOR, true));
-			statGrid.add(PanelUi.statCell("", view.getNetPerHour() != 0
-				? PanelUi.gpPlain(view.getNetPerHour()) + "/hr" : "", ColorScheme.LIGHT_GRAY_COLOR, false));
-			statGrid.add(PanelUi.statCell("Gains", "+" + PanelUi.gpPlain(view.getGains()), PanelUi.GAIN_COLOR, false));
-			statGrid.add(PanelUi.statCell("Losses", "-" + PanelUi.gpPlain(view.getLosses()), PanelUi.LOSS_COLOR, false));
-			if (view.getAtRisk() > 0)
-			{
-				statGrid.add(PanelUi.statCell("At risk", PanelUi.gpPlain(view.getAtRisk()), PanelUi.DEATH_COLOR, false));
-				statGrid.add(new JLabel());
-			}
-		}
-		statGrid.setMaximumSize(new Dimension(Integer.MAX_VALUE, statGrid.getPreferredSize().height));
-
-		if (sessionShowing)
-		{
-			PanelUi.fillGrid(gainGrid, view.getGainItems(), PanelUi.GAIN_CELL, itemManager);
-			PanelUi.fillGrid(lossGrid, view.getLossItems(), PanelUi.LOSS_CELL, itemManager);
-		}
-		else
-		{
-			gainGrid.setVisible(false);
-			lossGrid.setVisible(false);
-		}
-
-		fillLines(incomeSection, incomePanel, sessionShowing && view.isShowIncomeList(), view.getIncomeEvents());
-		fillLines(costSection, costPanel, sessionShowing && view.isShowCostList(), view.getCostEvents());
-
-		deathsSection.setVisible(sessionShowing && !view.getDeaths().isEmpty());
-		deathsPanel.removeAll();
-		if (sessionShowing)
-		{
-			for (DeathRow d : view.getDeaths())
-			{
-				deathsPanel.add(PanelUi.deathRow(d, controls));
-				deathsPanel.add(PanelUi.vgap(4));
-			}
-		}
-
-		revalidate();
-		repaint();
-	}
-
-	private void fillLines(JPanel holder, JPanel body, boolean show, List<EventLine> lines)
-	{
-		holder.setVisible(show && !lines.isEmpty());
-		body.removeAll();
-		for (EventLine line : lines)
-		{
-			body.add(PanelUi.eventLine(line));
-		}
+		slayerContent.render(view);
 	}
 }

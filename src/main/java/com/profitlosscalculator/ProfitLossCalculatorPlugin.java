@@ -49,7 +49,7 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
-import net.runelite.api.events.VarbitChanged;
+import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
@@ -64,8 +64,11 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.game.ItemVariationMapping;
 import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDependency;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.plugins.slayer.SlayerPlugin;
+import net.runelite.client.plugins.slayer.SlayerPluginService;
 import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -78,8 +81,9 @@ import net.runelite.client.util.Text;
 @PluginDescriptor(
 	name = "Profit Loss Calculator",
 	description = "Profit / loss for a play session - loot and pickups in, supplies / spells / teleports / ammo / deaths out - with a boss kill tally and a JSON log",
-	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income"}
+	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income", "slayer", "targeted"}
 )
+@PluginDependency(SlayerPlugin.class)
 public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalculatorPanel.Controls
 {
 	/** Ticks after death during which we watch the containers for the item loss. Items can
@@ -179,6 +183,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	@Inject
 	private ProfitLossCalculatorOverlay overlay;
+
+	@Inject
+	private SlayerPluginService slayerService;
+
+	/** Accumulates the current Slayer run's matched task-mob names; also caches the live task
+	 *  name/location/progress for the idle preview. See {@link SlayerTaskTracker}. */
+	private final SlayerTaskTracker slayerTracker = new SlayerTaskTracker();
 
 	private ProfitLossCalculatorPanel panel;
 	private NavigationButton navButton;
@@ -391,10 +402,23 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		});
 	}
 
-	/** The run's title: the farmed mob, or "Session". */
+	/** The run's title: the farmed mob, the current Slayer task name, or "Session". */
 	private String sessionTitle()
 	{
-		return session != null && session.isTargeted() ? session.getTargetMob() : "Session";
+		if (session == null)
+		{
+			return "Session";
+		}
+		if (session.isTargeted())
+		{
+			return String.join(", ", session.getTargetMobs());
+		}
+		if (session.isSlayer())
+		{
+			final String task = slayerTracker.getTaskName();
+			return task == null || task.isEmpty() ? "Slayer" : task;
+		}
+		return "Session";
 	}
 
 	// ------------------------------------------------------------------ panel controls
@@ -407,7 +431,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			if (session == null || sessionFinished)
 			{
-				startRun(null);
+				startRun(Session.RunMode.SESSION, Collections.emptyList());
 			}
 			else
 			{
@@ -429,7 +453,41 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			if (session == null || sessionFinished)
 			{
-				startRun(trimmed);
+				startRun(Session.RunMode.TARGETED, Collections.singletonList(trimmed));
+			}
+		});
+	}
+
+	/** The Targeted-tab "Add mob" button: grow the current farm's target group. Ignored unless
+	 *  a Targeted farm is already live (running or paused). */
+	@Override
+	public void onAddTargetMob(String mob)
+	{
+		final String trimmed = mob == null ? "" : mob.trim();
+		if (trimmed.isEmpty())
+		{
+			return;
+		}
+		clientThread.invoke(() ->
+		{
+			if (session != null && !sessionFinished && session.isTargeted())
+			{
+				session.addTargetMob(trimmed);
+				refreshView();
+			}
+		});
+	}
+
+	/** The Slayer-tab start button: begin tracking the currently detected task. Ignored if a
+	 *  run is live, or if there is no task detected. */
+	@Override
+	public void onStartSlayer()
+	{
+		clientThread.invoke(() ->
+		{
+			if ((session == null || sessionFinished) && slayerTracker.hasTask())
+			{
+				startRun(Session.RunMode.SLAYER, Collections.emptyList());
 			}
 		});
 	}
@@ -451,12 +509,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	{
 		clientThread.invoke(() ->
 		{
-			final String target = session != null ? session.getTargetMob() : null;
+			final Session.RunMode mode = session != null ? session.getMode() : Session.RunMode.SESSION;
+			final List<String> targets = session != null
+				? new ArrayList<>(session.getTargetMobs()) : Collections.emptyList();
 			if (session != null && !sessionFinished)
 			{
 				stopSession();
 			}
-			startRun(target);
+			startRun(mode, targets);
 		});
 	}
 
@@ -498,8 +558,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	// ------------------------------------------------------------------ session lifecycle
 
-	/** Begin a run. {@code targetMob == null} is a plain session; non-null is a targeted farm. */
-	private void startRun(String targetMob)
+	/** Begin a run. {@code mode} picks plain session / Targeted farm / Slayer task;
+	 *  {@code targetMobs} is only meaningful for {@link Session.RunMode#TARGETED} - the farm's
+	 *  initial target group (more can be added later via {@link #onAddTargetMob}). */
+	private void startRun(Session.RunMode mode, List<String> targetMobs)
 	{
 		final Instant now = Instant.now();
 
@@ -543,14 +605,24 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			logger.open(now);
 		}
-		final String target = targetMob == null || targetMob.trim().isEmpty() ? null : targetMob.trim();
+		final List<String> targets = targetMobs == null ? Collections.emptyList() : targetMobs;
+		if (mode == Session.RunMode.SLAYER)
+		{
+			slayerTracker.reset();
+			// seed with whatever's already spawned nearby - onNpcSpawned only fires for NPCs
+			// that spawn *after* this point, so anything already standing here needs an
+			// explicit first read or its kill silently wouldn't match the task
+			slayerTracker.accumulateTargets(slayerService);
+		}
 		logger.line("session_start")
 			.put("startedAt", now.toString())
-			.put("target", target)
+			.put("mode", mode.name())
+			.put("target", targets.isEmpty() ? null : String.join(", ", targets))
 			.submit();
 
 		session = new Session(now);
-		session.setTargetMob(target);
+		session.setMode(mode);
+		targets.forEach(session::addTargetMob);
 		sessionFinished = false;
 		refreshView();
 	}
@@ -566,6 +638,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		ammoTracker.reset(ammoOwned());
 		pickupTracker.reset();
 		prevTickItems = trackedItems();
+		if (!paused && session.isSlayer())
+		{
+			// onNpcSpawned doesn't accumulate while paused, so anything that spawned nearby
+			// (or was already there in a new area) during the pause needs the same explicit
+			// catch-up read as a fresh Start
+			slayerTracker.accumulateTargets(slayerService);
+		}
 		logger.line(paused ? "session_pause" : "session_resume").submit();
 		refreshView();
 	}
@@ -612,12 +691,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final SessionSummary summary = SessionSummary.of(session, collected, potential);
 		final long durationSec = java.time.Duration.between(
 			session.getStartTime(), session.getEndTime()).getSeconds();
-		final boolean targeted = session.isTargeted();
+		final Session.RunMode mode = session.getMode();
+		final boolean targeted = mode == Session.RunMode.TARGETED;
 		final Map<String, RunRecord.MobRun> perMob = perMobRollup();
 
 		logger.line("session_stop")
 			.put("sessionId", sessionId())
-			.put("target", session.getTargetMob())
+			.put("target", String.join(", ", session.getTargetMobs()))
 			.put("durationSeconds", durationSec)
 			.put("valuation", config.incomeValuation().name())
 			.put("summary", summary.toJsonFields())
@@ -629,10 +709,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final Path file = logger.path();
 		logger.close();
 
-		// every run - session or farm - feeds the per-mob lifetime history
+		// every run - session, farm or slayer task - feeds the per-mob lifetime history
+		final String kind = targeted ? "farm" : mode == Session.RunMode.SLAYER ? "slayer" : "session";
 		history.record(new RunRecord(
 			SessionHistory.SCHEMA,
-			targeted ? "farm" : "session",
+			kind,
 			session.getStartTime().toString(),
 			session.getEndTime().toString(),
 			durationSec,
@@ -646,14 +727,33 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			final StringBuilder msg = new StringBuilder("[Profit Loss Calculator] ");
 			if (targeted)
 			{
-				final RunRecord.MobRun mr = perMob.get(session.getTargetMob());
-				final long farmNet = mr == null ? 0 : mr.getGained() - mr.getCost();
-				msg.append(session.getTargetMob()).append(" farm: ")
+				long farmNet = 0;
+				for (RunRecord.MobRun mr : perMob.values())
+				{
+					farmNet += mr.getGained() - mr.getCost();
+				}
+				msg.append(String.join(", ", session.getTargetMobs())).append(" farm: ")
 					.append(farmNet >= 0 ? "+" : "-").append(gp(Math.abs(farmNet)));
 				if (kills > 0)
 				{
 					msg.append(" over ").append(kills).append(" kill(s) (")
 						.append(gp(farmNet / kills)).append("/kill)");
+				}
+			}
+			else if (mode == Session.RunMode.SLAYER)
+			{
+				long slayerNet = 0;
+				for (RunRecord.MobRun mr : perMob.values())
+				{
+					slayerNet += mr.getGained() - mr.getCost();
+				}
+				final String task = slayerTracker.getTaskName();
+				msg.append(task == null || task.isEmpty() ? "Slayer" : task).append(" task: ")
+					.append(slayerNet >= 0 ? "+" : "-").append(gp(Math.abs(slayerNet)));
+				if (kills > 0)
+				{
+					msg.append(" over ").append(kills).append(" kill(s) (")
+						.append(gp(slayerNet / kills)).append("/kill)");
 				}
 			}
 			else
@@ -770,24 +870,6 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			accumulateDeathLoss();
 		}
 		checkContainerReturn();
-
-		reconcileAmmo(deathWindowTicks == 0 && !bankOpen && !session.isPaused());
-	}
-
-	@Subscribe
-	public void onVarbitChanged(VarbitChanged event)
-	{
-		if (!tracking())
-		{
-			return;
-		}
-		final int vp = event.getVarpId();
-		if (vp == VarPlayerID.ROCKTHROWER
-			|| vp == VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO
-			|| vp == VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO_AMOUNT)
-		{
-			reconcileAmmo(deathWindowTicks == 0 && !bankOpen && !session.isPaused());
-		}
 	}
 
 	@Subscribe
@@ -833,20 +915,44 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		// cheap field reads on the bundled Slayer plugin's own service - polled every tick
+		// (even idle) so the Slayer tab's task preview stays live before Start is pressed.
+		final boolean slayerOn = config.trackSlayerTask();
+		final boolean taskChanged = slayerOn && slayerTracker.pollLiveInfo(slayerService);
+
 		if (!tracking())
 		{
+			if (slayerOn)
+			{
+				refreshView();
+			}
 			return;
+		}
+		if (taskChanged)
+		{
+			// a run may be live and waiting on this - don't wait for an unrelated event to
+			// push the header's task preview / progress up to date
+			viewDirty = true;
 		}
 		updateBankState();
 		pushStateHistory();
 		trackOpponent();
+
+		// true once per tick, after this tick's container/varp changes have all landed - ammo,
+		// teleports and income are all reconciled against this single settled state rather than
+		// eagerly per event, so a multi-step action (e.g. loading a cannonball: inventory count
+		// drops and the loaded-count varp rises as two separate events) can never be read as a
+		// real fire/pickup just because one half of it landed before the other.
+		final boolean accrue = deathWindowTicks == 0 && !bankOpen && !session.isPaused();
+
+		reconcileAmmo(accrue);
 
 		// teleport charge drops and ground pickups are read once per tick so equipping /
 		// unequipping jewellery (item moves inv<->worn within a tick, net zero) never looks
 		// like a teleport. Skip while banking / paused - a deposit would look like spending
 		// the last charge, a withdrawal like a pickup.
 		final Map<Integer, Integer> curItems = trackedItems();
-		if (deathWindowTicks == 0 && !bankOpen && !session.isPaused())
+		if (accrue)
 		{
 			if (!prevTickItems.isEmpty())
 			{
@@ -1057,6 +1163,22 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 	}
 
+	/**
+	 * Grows the current Slayer run's matched-mob set as new task NPCs spawn nearby. Reads
+	 * {@link SlayerPluginService#getTargets()} - the bundled Slayer plugin already did the
+	 * scene scan for its own highlighter, this just merges its result in - so this stays event
+	 * driven rather than a per-tick scan.
+	 */
+	@Subscribe
+	public void onNpcSpawned(NpcSpawned event)
+	{
+		if (!config.trackSlayerTask() || !accruing() || !session.isSlayer())
+		{
+			return;
+		}
+		slayerTracker.accumulateTargets(slayerService);
+	}
+
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
@@ -1093,9 +1215,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	}
 
 	/**
-	 * An NPC died. A targeted farm opens a per-kill bucket for the farmed mob only; a plain
-	 * session bumps the per-mob kill tally (no bucket, no loot attribution). Either way the
-	 * kill is counted against its mob name.
+	 * An NPC died. A grouped run (Targeted farm or Slayer task) opens a per-kill bucket only
+	 * for mobs matching its target group; a plain session bumps the per-mob kill tally (no
+	 * bucket, no loot attribution). Either way a matched kill is counted against its mob name.
 	 */
 	private void handleNpcKill(NPC npc)
 	{
@@ -1114,7 +1236,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		final int tick = client.getTickCount();
 
-		if (!session.isTargeted())
+		if (!session.isGrouped())
 		{
 			if (tick - lastPlainKillTick < SAME_NPC_DEBOUNCE_TICKS && name.equals(lastPlainKillName))
 			{
@@ -1127,7 +1249,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return;
 		}
 
-		if (!nameMatches(name, session.getTargetMob()))
+		if (!session.matchesTarget(name, slayerTracker))
 		{
 			return;
 		}
@@ -1138,16 +1260,6 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		openKill(name, tick, "death");
 		refreshView();
-	}
-
-	/** Exact, case-insensitive, tag-stripped NPC-name match for the targeted-farm filter. */
-	static boolean nameMatches(String candidate, String target)
-	{
-		if (candidate == null || target == null)
-		{
-			return false;
-		}
-		return Text.removeTags(candidate).trim().equalsIgnoreCase(target.trim());
 	}
 
 	/** True when {@code npcName} is one of the {@link #PHASE_DEATH_MOBS}. */
@@ -1173,14 +1285,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 	}
 
-	/** The mob a cost incurred right now belongs to: the farm target, else whoever we are
-	 *  fighting (kept sticky a few ticks past the last hit), else {@code null} (not in combat). */
+	/** The mob a cost incurred right now belongs to: whoever we are fighting (kept sticky a few
+	 *  ticks past the last hit), else {@code null} (not in combat). A Targeted farm can have
+	 *  several targets now, so - like Slayer - cost follows the actual opponent rather than
+	 *  being forced onto one name; {@code perMobRollupMulti} folds anything that isn't one of
+	 *  the farm's targets into the not-in-combat bucket. */
 	private String costMob()
 	{
-		if (session != null && session.isTargeted())
-		{
-			return session.getTargetMob();
-		}
 		return currentOpponent != null
 			&& client.getTickCount() - opponentTick <= OPPONENT_STICKY_TICKS
 			? currentOpponent : null;
@@ -1266,12 +1377,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			lootCollector.add(ie, client.getTickCount());
 		}
 
-		// In a targeted farm, attribute the farmed mob's loot to the kill it came from (if no
-		// matching kill fired an ActorDeath the loot itself opens the kill). Everything else -
-		// stray mobs, and all loot in a plain session - stays in the flat income list only.
+		// In a grouped run (Targeted farm or Slayer task), attribute matched-mob loot to the
+		// kill it came from (if no matching kill fired an ActorDeath the loot itself opens the
+		// kill). Everything else - stray mobs, and all loot in a plain session - stays in the
+		// flat income list only.
 		BossKill kill = null;
-		if (type == IncomeEvent.Type.NPC_LOOT && session.isTargeted()
-			&& nameMatches(source, session.getTargetMob()))
+		if (type == IncomeEvent.Type.NPC_LOOT && session.isGrouped()
+			&& session.matchesTarget(source, slayerTracker))
 		{
 			final String key = Text.removeTags(source).trim();
 			final int tick = client.getTickCount();
@@ -1287,7 +1399,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			}
 			kill.add(ie);
 		}
-		else if (type == IncomeEvent.Type.NPC_LOOT && !session.isTargeted() && isPhaseDeathMob(source))
+		else if (type == IncomeEvent.Type.NPC_LOOT && !session.isGrouped() && isPhaseDeathMob(source))
 		{
 			// handleNpcKill ignores this boss's scripted death and a plain session has no loot
 			// bucket to hang the count on - so count the kill here, off the drop.
@@ -1665,26 +1777,35 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			addSlotAmmo(owned, worn.getItem(WEAPON_SLOT), true);
 		}
 
-		// inventory copies of anything already tracked, so unequipping ammo to swap types
-		// nets to zero instead of reading as a full-stack loss
-		for (int id : ammoTracker.tracked())
+		// Inventory copies of anything already tracked, so unequipping ammo to swap types nets
+		// to zero instead of reading as a full-stack loss. Cannonballs are folded into this same
+		// set (rather than a second loop) specifically so each id is only ever added to `owned`
+		// once - a second loop using the same `owned.merge(id, inv, ...)` pattern would double
+		// whatever this one already added the moment cannonballs became part of `tracked()`
+		// (i.e. from the tick after they were first seen onward), which is exactly what caused
+		// loading the cannon to charge double.
+		//
+		// Cannonballs are tracked purely by inventory count, like any other ammo - the cannon's
+		// internal loaded-count varp is deliberately not consulted: combining the two (inventory
+		// + loaded) was meant to make "load into cannon" a wash, but the two updates don't
+		// reliably land in the same tick during a multi-ball load animation, so it was instead
+		// charging once when the count visibly dipped mid-load and again when the cannon
+		// actually fired. Charging purely off the inventory drop means loading is the one and
+		// only charge; the cannon firing later never touches the inventory, so it can't charge
+		// again. If unfired balls ever come back to the inventory (reclaiming the cannon),
+		// that's an ordinary inventory rise and the tracker already treats it as a recovery, the
+		// same as picking arrows back up off the ground.
+		final Set<Integer> invTracked = new HashSet<>(ammoTracker.tracked());
+		for (int cb : CANNONBALL_IDS)
+		{
+			invTracked.add(cb);
+		}
+		for (int id : invTracked)
 		{
 			final long inv = lastKnownInv.getOrDefault(id, 0);
 			if (inv > 0)
 			{
 				owned.merge(id, inv, Long::sum);
-			}
-		}
-
-		// cannonballs: loose in the inventory plus whatever is loaded in the cannon
-		final long loaded = Math.max(0, client.getVarpValue(VarPlayerID.ROCKTHROWER));
-		for (int cb : CANNONBALL_IDS)
-		{
-			final long inv = lastKnownInv.getOrDefault(cb, 0);
-			final long extra = cb == ItemID.MCANNONBALL ? loaded : 0;
-			if (inv + extra > 0)
-			{
-				owned.merge(cb, inv + extra, Long::sum);
 			}
 		}
 
@@ -2004,8 +2125,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final IncomeEvent ie = new IncomeEvent(IncomeEvent.Type.ALCH, Instant.now(), source,
 			Collections.singletonMap(ItemID.COINS, (int) coins));
 		session.add(ie);
-		// a farm's own alch profit should show in the live per-kill view, not just history
-		if (session.isTargeted() && nameMatches(source, session.getTargetMob()) && session.lastKill() != null)
+		// a grouped run's own alch profit should show in the live per-kill view, not just history
+		if (session.isGrouped() && session.matchesTarget(source, slayerTracker) && session.lastKill() != null)
 		{
 			session.lastKill().add(ie);
 		}
@@ -2090,7 +2211,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 		final ProfitLossCalculatorPanel.View.ViewBuilder b = ProfitLossCalculatorPanel.View.builder()
 			.showIncomeList(config.showIncomeList())
-			.showCostList(config.showCostList());
+			.showCostList(config.showCostList())
+			.slayerTaskName(slayerTracker.getTaskName() == null ? "" : slayerTracker.getTaskName())
+			.slayerTaskLocation(slayerTracker.getTaskLocation() == null ? "" : slayerTracker.getTaskLocation())
+			.slayerInitialAmount(slayerTracker.getInitialAmount())
+			.slayerRemainingAmount(slayerTracker.getRemainingAmount());
 
 		if (session == null)
 		{
@@ -2108,35 +2233,38 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				e.getState() != DeathEntry.State.PENDING));
 		}
 
-		final boolean targeted = session.isTargeted();
-		// loot attributed to a kill; in a targeted farm this is the target's loot, and only
-		// this counts toward net - everything else is "other income"
+		final boolean grouped = session.isGrouped();
+		// loot attributed to a kill; in a grouped run (Targeted/Slayer) this is the target
+		// group's loot, and only this counts toward net - everything else is "other income"
 		final Set<IncomeEvent> inKill = killAttributed();
 
 		final long cost = session.total();
 		final long collectedAll = collectedTotal();
-		final long farmCollected = targeted ? killAttributedValue(this::countedItems) : collectedAll;
-		final long farmDropped = targeted ? killAttributedValue(IncomeEvent::getItems) : potentialTotal();
+		final long farmCollected = grouped ? killAttributedValue(this::countedItems) : collectedAll;
+		final long farmDropped = grouped ? killAttributedValue(IncomeEvent::getItems) : potentialTotal();
 		final long net = farmCollected - cost;
 		final long kills = session.getBossKills();
 		final long secs = java.time.Duration.between(session.getStartTime(),
 			session.getEndTime() != null ? session.getEndTime() : Instant.now()).getSeconds();
 
-		b.gainItems(gainGridItems(targeted ? inKill : null));
+		b.gainItems(gainGridItems(grouped ? inKill : null));
 		b.lossItems(lossGridItems());
 		b.incomeEvents(incomeLines(session, inKill));
 		b.costEvents(eventLines(session));
-		if (targeted)
+		if (grouped)
 		{
 			b.killRows(killRows());
+		}
+		if (session.isTargeted())
+		{
+			b.mobBlocks(targetFarmMobBlocks());
 		}
 
 		return b
 			.active(!sessionFinished)
 			.paused(session.isPaused())
 			.finished(sessionFinished)
-			.targeted(targeted)
-			.targetMob(session.getTargetMob() == null ? "" : session.getTargetMob())
+			.mode(session.getMode())
 			.state(sessionFinished ? "stopped" : session.isPaused() ? "paused" : "running")
 			.title(sessionTitle())
 			.kills((int) kills)
@@ -2145,8 +2273,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			.losses(cost)
 			.net(net)
 			.netPerHour(secs > 60 ? net * 3600 / secs : 0)
-			.gpPerKill(targeted && kills > 0 ? net / kills : 0)
-			.secPerKill(targeted && kills > 0 && secs > 0 ? secs / kills : 0)
+			.gpPerKill(grouped && kills > 0 ? net / kills : 0)
+			.secPerKill(grouped && kills > 0 && secs > 0 ? secs / kills : 0)
 			.potential(farmDropped)
 			.atRisk(session.atRiskTotal())
 			.build();
@@ -2181,56 +2309,37 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	}
 
 	/**
-	 * Per-mob rollup for the run - the shape written to history. Loot is grouped by the NPC
-	 * that dropped it; costs and deaths by whoever was being fought when they were incurred
-	 * (the empty-string key = incurred while not in combat). A targeted farm collapses to the
-	 * single target mob; every other mob is dropped.
+	 * Per-mob rollup for the run - the shape written to history, and also reused live for the
+	 * Targeted tab's per-mob blocks (see {@link #targetFarmMobBlocks}). Loot is grouped by the
+	 * NPC that dropped it; costs and deaths by whoever was being fought when they were incurred
+	 * (the empty-string key = incurred while not in combat). A Targeted farm keeps one row per
+	 * matched target mob (everything else is dropped); a Slayer run keeps one row per matched
+	 * species (non-task mobs are dropped, same scoping); a plain session keeps every mob it
+	 * touched.
 	 */
 	private Map<String, RunRecord.MobRun> perMobRollup()
+	{
+		if (!session.isGrouped())
+		{
+			return perMobRollupMulti(mob -> true);
+		}
+		return perMobRollupMulti(mob -> mob.isEmpty() || session.matchesTarget(mob, slayerTracker));
+	}
+
+	/**
+	 * One row per mob name actually touched. {@code keep} decides which mob names get their own
+	 * row - always-true for a plain session, and "one of the farm's targets" / "task-matched"
+	 * for Targeted / Slayer respectively (both funnel through {@link Session#matchesTarget}).
+	 * Loot from a mob {@code keep} rejects is dropped entirely (it was never live-counted toward
+	 * net either - see {@code killAttributed} in {@link #buildView}), but its cost/deaths fold
+	 * into the not-in-combat bucket rather than vanishing, so the rollup's total cost still
+	 * matches {@link Session#total()} - the figure the live Net is built from.
+	 */
+	private Map<String, RunRecord.MobRun> perMobRollupMulti(java.util.function.Predicate<String> keep)
 	{
 		final boolean full = config.countUncollectedDrops();
 		final long floor = Math.max(0, config.ignoreIncomeBelow());
 		final Map<String, RunRecord.MobRun> out = new LinkedHashMap<>();
-
-		if (session.isTargeted())
-		{
-			final Map<Integer, Integer> got = new LinkedHashMap<>();
-			final Map<Integer, Integer> drop = new LinkedHashMap<>();
-			for (IncomeEvent e : session.getIncome())
-			{
-				if (e.getType() == IncomeEvent.Type.PICKUP
-					|| !nameMatches(e.getSource(), session.getTargetMob())
-					|| lootValue(e.getItems()) < floor)
-				{
-					continue;
-				}
-				(full ? e.getItems() : e.getCollected()).forEach((id, q) -> got.merge(id, q, Integer::sum));
-				e.getItems().forEach((id, q) -> drop.merge(id, q, Integer::sum));
-			}
-			long cost = 0;
-			for (long gp : session.getCostByMob().values())
-			{
-				cost += gp;
-			}
-			int deaths = 0;
-			for (DeathEntry d : session.getDeaths())
-			{
-				if (d.isCounted())
-				{
-					cost += d.getResolvedCost();
-					deaths++;
-				}
-			}
-			final List<long[]> items = itemTriples(got);
-			final long gained = items.stream().mapToLong(t -> t[2]).sum();
-			final long dropGp = drop.entrySet().stream()
-				.mapToLong(en -> lootValue(en.getKey(), en.getValue())).sum();
-			final String key = session.getKillsByMob().isEmpty()
-				? session.getTargetMob()
-				: session.getKillsByMob().keySet().iterator().next();
-			out.put(key, new RunRecord.MobRun(session.getBossKills(), gained, dropGp, cost, deaths, items));
-			return out;
-		}
 
 		final Map<String, long[]> scalar = new LinkedHashMap<>();   // mob -> {kills, cost, deaths}
 		final Map<String, Map<Integer, Integer>> got = new LinkedHashMap<>();
@@ -2243,7 +2352,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				continue; // ground pickups have no mob
 			}
 			final String mob = Text.removeTags(e.getSource() == null ? "" : e.getSource()).trim();
-			if (mob.isEmpty() || lootValue(e.getItems()) < floor)
+			if (mob.isEmpty() || lootValue(e.getItems()) < floor || !keep.test(mob))
 			{
 				continue;
 			}
@@ -2253,17 +2362,23 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			e.getItems().forEach((id, q) -> drop.get(mob).merge(id, q, Integer::sum));
 		}
 		session.getKillsByMob().forEach((mob, n) ->
-			scalar.computeIfAbsent(mob, k -> new long[3])[0] += n);
+		{
+			if (keep.test(mob))
+			{
+				scalar.computeIfAbsent(mob, k -> new long[3])[0] += n;
+			}
+		});
 		session.getCostByMob().forEach((mob, gp) ->
-			scalar.computeIfAbsent(mob, k -> new long[3])[1] += gp);
+			scalar.computeIfAbsent(keep.test(mob) ? mob : SessionHistory.UNATTRIBUTED, k -> new long[3])[1] += gp);
 		for (DeathEntry d : session.getDeaths())
 		{
 			if (!d.isCounted())
 			{
 				continue;
 			}
-			final long[] s = scalar.computeIfAbsent(
-				d.getMob() == null ? SessionHistory.UNATTRIBUTED : d.getMob(), k -> new long[3]);
+			final String rawMob = d.getMob() == null ? SessionHistory.UNATTRIBUTED : d.getMob();
+			final String mob = keep.test(rawMob) ? rawMob : SessionHistory.UNATTRIBUTED;
+			final long[] s = scalar.computeIfAbsent(mob, k -> new long[3]);
 			s[1] += d.getResolvedCost();
 			s[2] += 1;
 		}
@@ -2283,11 +2398,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		return out;
 	}
 
-	/** The most recent {@value #KILL_ROWS_SHOWN} kills of a targeted farm, newest first -
-	 *  index, time and that kill's collected value. */
+	/** The most recent {@value #KILL_ROWS_SHOWN} kills of a Targeted farm or Slayer task,
+	 *  newest first - index, time and that kill's collected value. A Slayer run's rows also
+	 *  carry the mob name (several species can appear); Targeted leaves it blank as redundant. */
 	private List<ProfitLossCalculatorPanel.KillRow> killRows()
 	{
 		final boolean full = config.countUncollectedDrops();
+		final boolean showMobName = session.isSlayer() || session.getTargetMobs().size() > 1;
 		final List<BossKill> kills = session.getKills();
 		final List<ProfitLossCalculatorPanel.KillRow> out = new ArrayList<>();
 		for (int i = kills.size() - 1; i >= 0 && out.size() < KILL_ROWS_SHOWN; i--)
@@ -2307,7 +2424,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 					+ (dropped != collected ? "<br>" + gp(collected) + " of " + gp(dropped) + " kept" : "")
 					+ "</html>";
 			out.add(new ProfitLossCalculatorPanel.KillRow(
-				k.getIndex(), LINE_TIME.format(k.getTime()), collected, dropped, tip));
+				k.getIndex(), LINE_TIME.format(k.getTime()), collected, dropped, tip,
+				showMobName ? k.getName() : ""));
 		}
 		return out;
 	}
@@ -2396,6 +2514,54 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			}
 		});
 		out.sort((x, y) -> Long.compare(y[2], x[2]));
+		return out;
+	}
+
+	/** {@code [id, qty, gp]} triples (as produced by {@link #itemTriples}) -&gt; grid items,
+	 *  resolving each id's display name. Mirrors {@code HistoryContent.gridItems()}. */
+	private List<ProfitLossCalculatorPanel.GridItem> gridItems(List<long[]> items)
+	{
+		final List<ProfitLossCalculatorPanel.GridItem> out = new ArrayList<>();
+		for (long[] it : items)
+		{
+			if (it == null || it.length < 2 || it[1] <= 0)
+			{
+				continue;
+			}
+			out.add(new ProfitLossCalculatorPanel.GridItem((int) it[0], (int) it[1],
+				it.length >= 3 ? it[2] : 0, itemName((int) it[0])));
+		}
+		return out;
+	}
+
+	/**
+	 * One live block per target mob in a Targeted farm, in the order they were added - reuses
+	 * {@link #perMobRollup} (the same rollup that feeds History) so a mob's live numbers and its
+	 * eventual history row always agree. A freshly added target with no kills yet still gets a
+	 * zeroed block, so adding a mob shows it immediately rather than waiting for a first kill.
+	 */
+	private List<ProfitLossCalculatorPanel.MobFarmBlock> targetFarmMobBlocks()
+	{
+		final Map<String, RunRecord.MobRun> perMob = perMobRollup();
+		final List<ProfitLossCalculatorPanel.MobFarmBlock> out = new ArrayList<>();
+		for (String target : session.getTargetMobs())
+		{
+			RunRecord.MobRun mr = null;
+			for (Map.Entry<String, RunRecord.MobRun> e : perMob.entrySet())
+			{
+				if (Session.nameMatches(e.getKey(), target))
+				{
+					mr = e.getValue();
+					break;
+				}
+			}
+			final long gained = mr == null ? 0 : mr.getGained();
+			final long cost = mr == null ? 0 : mr.getCost();
+			final int kills = mr == null ? 0 : mr.getKills();
+			out.add(new ProfitLossCalculatorPanel.MobFarmBlock(target, kills, gained - cost, gained, cost,
+				kills > 0 ? (gained - cost) / kills : 0,
+				mr == null ? Collections.emptyList() : gridItems(mr.getItems())));
+		}
 		return out;
 	}
 
