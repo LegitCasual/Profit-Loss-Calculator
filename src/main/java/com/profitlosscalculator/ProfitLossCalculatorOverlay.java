@@ -74,7 +74,7 @@ class ProfitLossCalculatorOverlay extends OverlayPanel
 				.left("Kills")
 				.right(Integer.toString(v.getKills()))
 				.build());
-			if (v.isTargeted())
+			if (v.isGrouped())
 			{
 				panelComponent.getChildren().add(LineComponent.builder()
 					.left("Net / kill")

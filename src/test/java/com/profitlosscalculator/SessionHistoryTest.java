@@ -129,9 +129,20 @@ public class SessionHistoryTest
 	@Test
 	public void nameMatchIsExactCaseInsensitiveTagStripped()
 	{
-		assertTrue(ProfitLossCalculatorPlugin.nameMatches("Brutus", "brutus"));
-		assertTrue(ProfitLossCalculatorPlugin.nameMatches("<col=00ffff>Brutus</col>", "Brutus"));
-		assertTrue(!ProfitLossCalculatorPlugin.nameMatches("Cow calf", "Cow"));
-		assertTrue(!ProfitLossCalculatorPlugin.nameMatches(null, "Cow"));
+		assertTrue(Session.nameMatches("Brutus", "brutus"));
+		assertTrue(Session.nameMatches("<col=00ffff>Brutus</col>", "Brutus"));
+		assertTrue(!Session.nameMatches("Cow calf", "Cow"));
+		assertTrue(!Session.nameMatches(null, "Cow"));
+	}
+
+	@Test
+	public void slayerRunsGetAPerKillRateLikeFarms()
+	{
+		RunRecord slayer = run("slayer", "2026-01-01T00:00:00Z",
+			"Aberrant spectre", mob(10, 100_000, 20_000));
+		SessionHistory.Snapshot s = SessionHistory.aggregate(Collections.singletonList(slayer));
+
+		SessionHistory.MobStats m = s.getMobs().get(0);
+		assertEquals(600 / 10, m.getSecPerKill());
 	}
 }

@@ -14,27 +14,26 @@ import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
-import javax.swing.JTextField;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 
 /**
- * The "Boss Target Farm" tab. Type a mob name, hit Start, and every kill of it is tracked
- * individually - loot in, and every cost incurred while the farm runs charged against it. More
- * mobs can be added to the same farm at any time (the same field relabels to "Add mob" once
- * running) - each gets its own block with its own net and gain icon grid, stacked under a
- * combined farm total, with one combined per-kill list at the bottom carrying each row's mob
- * name once there's more than one target. Loot from anything else killed during the farm shows
- * under "Other income" and is not part of the net.
+ * The "Slayer" tab. Auto-detects the player's current Slayer task (name, location, progress -
+ * see {@link SlayerTaskTracker}) and, once started, tracks a clean per-kill ledger for every
+ * mob that has matched the task. Unlike Targeted farm's single mob, a Slayer run can involve
+ * several species (and, since the run isn't stopped when the task changes, can span more than
+ * one task assignment) - so its per-kill list carries a mob name per row. Loot from anything
+ * that never matched the task shows under "Other income" and is not part of the net, same as
+ * Targeted's stray kills.
  */
-class TargetedContent extends JPanel
+class SlayerContent extends JPanel
 {
 	private final ProfitLossCalculatorPanel.Controls controls;
 	private final ItemManager itemManager;
 
-	private final JTextField mobField = new JTextField();
-	private final JButton startBtn = new JButton("Start farm");
+	private final JLabel taskLabel = new JLabel();
+	private final JButton startBtn = new JButton("Start tracking");
 	private final JButton pauseBtn = new JButton("Pause");
 	private final JButton stopBtn = new JButton("Stop");
 	private final JButton restartBtn = new JButton("Restart");
@@ -47,8 +46,6 @@ class TargetedContent extends JPanel
 	private final JPanel gainGrid = new JPanel(new GridLayout(0, PanelUi.GRID_COLS, 2, 2));
 	private final JPanel lossGrid = new JPanel(new GridLayout(0, PanelUi.GRID_COLS, 2, 2));
 
-	private final JPanel mobBlocksSection = new JPanel();
-	private final JPanel mobBlocksPanel = new JPanel();
 	private final JPanel killSection = new JPanel();
 	private final JPanel killPanel = new JPanel();
 	private final JPanel otherSection = new JPanel();
@@ -58,11 +55,7 @@ class TargetedContent extends JPanel
 	private final JPanel deathsSection = new JPanel();
 	private final JPanel deathsPanel = new JPanel();
 
-	/** True while a farm is running or paused (not finished) - decides what the shared
-	 *  field/button pair does when submitted: Start a new farm, or Add to the running one. */
-	private boolean farmActive;
-
-	TargetedContent(ProfitLossCalculatorPanel.Controls controls, ItemManager itemManager)
+	SlayerContent(ProfitLossCalculatorPanel.Controls controls, ItemManager itemManager)
 	{
 		this.controls = controls;
 		this.itemManager = itemManager;
@@ -73,15 +66,12 @@ class TargetedContent extends JPanel
 		final JPanel content = new JPanel();
 		content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
 
-		final JPanel search = new JPanel(new BorderLayout(4, 0));
-		search.setAlignmentX(LEFT_ALIGNMENT);
-		mobField.setToolTipText("Exact NPC name, e.g. Brutus - start typing for suggestions");
-		mobField.addActionListener(e -> submitMobField());
-		AutocompletePopup.attach(mobField, KnownMobNames.all());
+		taskLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		taskLabel.setFont(FontManager.getRunescapeSmallFont());
+		taskLabel.setAlignmentX(LEFT_ALIGNMENT);
+
 		startBtn.setFocusPainted(false);
-		startBtn.addActionListener(e -> submitMobField());
-		search.add(mobField, BorderLayout.CENTER);
-		search.add(startBtn, BorderLayout.EAST);
+		startBtn.addActionListener(e -> controls.onStartSlayer());
 
 		pauseBtn.setFocusPainted(false);
 		stopBtn.setFocusPainted(false);
@@ -98,7 +88,9 @@ class TargetedContent extends JPanel
 		hintLabel.setFont(FontManager.getRunescapeSmallFont());
 		hintLabel.setAlignmentX(LEFT_ALIGNMENT);
 
-		content.add(PanelUi.stretch(search));
+		content.add(PanelUi.stretch(taskLabel));
+		content.add(PanelUi.vgap(4));
+		content.add(PanelUi.stretch(startBtn));
 		content.add(PanelUi.vgap(4));
 		content.add(runButtons);
 		content.add(PanelUi.vgap(4));
@@ -132,8 +124,6 @@ class TargetedContent extends JPanel
 		content.add(summary);
 		content.add(PanelUi.vgap(8));
 
-		mobBlocksPanel.setLayout(new BoxLayout(mobBlocksPanel, BoxLayout.Y_AXIS));
-		section(mobBlocksSection, "Per boss", mobBlocksPanel);
 		killPanel.setLayout(new BoxLayout(killPanel, BoxLayout.Y_AXIS));
 		section(killSection, "Per kill", killPanel);
 		otherPanel.setLayout(new BoxLayout(otherPanel, BoxLayout.Y_AXIS));
@@ -142,7 +132,6 @@ class TargetedContent extends JPanel
 		section(costSection, "Costs", costPanel);
 		deathsPanel.setLayout(new BoxLayout(deathsPanel, BoxLayout.Y_AXIS));
 		section(deathsSection, "Deaths", deathsPanel);
-		content.add(mobBlocksSection);
 		content.add(killSection);
 		content.add(otherSection);
 		content.add(costSection);
@@ -150,27 +139,6 @@ class TargetedContent extends JPanel
 
 		add(content, BorderLayout.NORTH);
 		render(ProfitLossCalculatorPanel.View.builder().build());
-	}
-
-	/** The shared field/button pair: Start a new farm when idle, or add another mob to the
-	 *  group when one is already running/paused. Clears the field after a successful add so
-	 *  it's ready for the next name - "type, Add, type the next one, Add". */
-	private void submitMobField()
-	{
-		final String mob = mobField.getText();
-		if (mob == null || mob.trim().isEmpty())
-		{
-			return;
-		}
-		if (farmActive)
-		{
-			controls.onAddTargetMob(mob);
-		}
-		else
-		{
-			controls.onStartFarm(mob);
-		}
-		mobField.setText("");
 	}
 
 	private static void section(JPanel holder, String title, JPanel body)
@@ -184,36 +152,31 @@ class TargetedContent extends JPanel
 
 	void render(ProfitLossCalculatorPanel.View view)
 	{
-		final boolean farm = view.isTargeted() && (view.isActive() || view.isFinished());
-		final boolean otherModeActive = !view.isTargeted() && view.isActive();
-		final boolean multiTarget = view.getMobBlocks().size() > 1;
-		farmActive = view.isTargeted() && view.isActive();
+		final boolean slayer = view.isSlayer() && (view.isActive() || view.isFinished());
+		final boolean otherModeActive = !view.isSlayer() && view.isActive();
+		final boolean hasTask = !view.getSlayerTaskName().isEmpty();
 
-		startBtn.setEnabled(!otherModeActive);
-		startBtn.setText(farmActive ? "Add mob" : "Start farm");
-		// enabled whenever it's usable: idle and free to start, or live and free to add to
-		mobField.setEnabled(!otherModeActive);
-		runButtons.setVisible(farm && view.isActive());
+		startBtn.setEnabled(!view.isActive() && hasTask);
+		taskLabel.setText(taskPreview(view));
+
+		runButtons.setVisible(slayer && view.isActive());
 		pauseBtn.setText(view.isPaused() ? "Resume" : "Pause");
 
 		hintLabel.setText(otherModeActive
-			? (view.isSlayer() ? "A Slayer task is running - see the Slayer tab"
-				: "A session is running - stop it to start a farm")
-			: farmActive ? "Type another mob and Add to grow this farm"
-			: farm ? "" : "Type a mob name and Start to track its profit per kill");
+			? (view.isTargeted() ? "A Boss Target Farm is running - see the Boss Target Farm tab"
+				: "A session is running - stop it to start Slayer tracking")
+			: slayer || hasTask ? ""
+			: "No Slayer task detected - get one from a Slayer Master");
 		hintLabel.setVisible(!hintLabel.getText().isEmpty());
 
-		titleLabel.setText(farm
-			? (multiTarget ? "Boss Target Farm · " + view.getMobBlocks().size() + " mobs" : view.getTitle())
-				+ (view.getState().isEmpty() ? "" : "  ·  " + view.getState())
-			: "");
-		killsLabel.setText(farm && view.getKills() > 0
+		titleLabel.setText(slayer ? "Slayer" + (view.getState().isEmpty() ? "" : "  ·  " + view.getState()) : "");
+		killsLabel.setText(slayer && view.getKills() > 0
 			? view.getKills() + " kill" + (view.getKills() == 1 ? "" : "s")
 			: "");
 
 		statGrid.removeAll();
-		statGrid.setVisible(farm);
-		if (farm)
+		statGrid.setVisible(slayer);
+		if (slayer)
 		{
 			statGrid.add(PanelUi.statCell("Net", PanelUi.sign(view.getNet()),
 				view.getNet() >= 0 ? PanelUi.GAIN_COLOR : PanelUi.LOSS_COLOR, true));
@@ -233,7 +196,7 @@ class TargetedContent extends JPanel
 		}
 		statGrid.setMaximumSize(new Dimension(Integer.MAX_VALUE, statGrid.getPreferredSize().height));
 
-		if (farm)
+		if (slayer)
 		{
 			PanelUi.fillGrid(gainGrid, view.getGainItems(), PanelUi.GAIN_CELL, itemManager);
 			PanelUi.fillGrid(lossGrid, view.getLossItems(), PanelUi.LOSS_CELL, itemManager);
@@ -244,18 +207,7 @@ class TargetedContent extends JPanel
 			lossGrid.setVisible(false);
 		}
 
-		mobBlocksSection.setVisible(farm && multiTarget);
-		mobBlocksPanel.removeAll();
-		if (multiTarget)
-		{
-			for (ProfitLossCalculatorPanel.MobFarmBlock mb : view.getMobBlocks())
-			{
-				mobBlocksPanel.add(PanelUi.mobFarmBlock(mb, itemManager));
-				mobBlocksPanel.add(PanelUi.vgap(4));
-			}
-		}
-
-		killSection.setVisible(farm && !view.getKillRows().isEmpty());
+		killSection.setVisible(slayer && !view.getKillRows().isEmpty());
 		killPanel.removeAll();
 		for (ProfitLossCalculatorPanel.KillRow k : view.getKillRows())
 		{
@@ -263,12 +215,12 @@ class TargetedContent extends JPanel
 			killPanel.add(PanelUi.vgap(2));
 		}
 
-		fillLines(otherSection, otherPanel, farm, view.getIncomeEvents());
-		fillLines(costSection, costPanel, farm && view.isShowCostList(), view.getCostEvents());
+		fillLines(otherSection, otherPanel, slayer, view.getIncomeEvents());
+		fillLines(costSection, costPanel, slayer && view.isShowCostList(), view.getCostEvents());
 
-		deathsSection.setVisible(farm && !view.getDeaths().isEmpty());
+		deathsSection.setVisible(slayer && !view.getDeaths().isEmpty());
 		deathsPanel.removeAll();
-		if (farm)
+		if (slayer)
 		{
 			for (ProfitLossCalculatorPanel.DeathRow d : view.getDeaths())
 			{
@@ -279,6 +231,26 @@ class TargetedContent extends JPanel
 
 		revalidate();
 		repaint();
+	}
+
+	/** "Aberrant spectres  ·  Catacombs of Kourend  ·  42 left", degrading gracefully as
+	 *  location/progress data is missing, or "No Slayer task detected" with none assigned. */
+	private static String taskPreview(ProfitLossCalculatorPanel.View view)
+	{
+		if (view.getSlayerTaskName().isEmpty())
+		{
+			return "No Slayer task detected";
+		}
+		final StringBuilder sb = new StringBuilder(view.getSlayerTaskName());
+		if (!view.getSlayerTaskLocation().isEmpty())
+		{
+			sb.append("  ·  ").append(view.getSlayerTaskLocation());
+		}
+		if (view.getSlayerInitialAmount() > 0)
+		{
+			sb.append("  ·  ").append(view.getSlayerRemainingAmount()).append(" left");
+		}
+		return sb.toString();
 	}
 
 	private void fillLines(JPanel holder, JPanel body, boolean show, java.util.List<ProfitLossCalculatorPanel.EventLine> lines)
