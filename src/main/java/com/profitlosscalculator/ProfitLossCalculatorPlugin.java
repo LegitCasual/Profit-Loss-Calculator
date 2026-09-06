@@ -34,13 +34,20 @@ import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.EnumID;
 import net.runelite.api.EquipmentInventorySlot;
+import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
+import net.runelite.api.NPCComposition;
+import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
+import net.runelite.api.Tile;
+import net.runelite.api.WorldView;
+import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
@@ -50,6 +57,7 @@ import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcSpawned;
+import net.runelite.api.events.WorldViewLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
@@ -60,6 +68,7 @@ import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.game.ItemVariationMapping;
@@ -145,6 +154,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  "Amulet of glory(t4)". */
 	private static final Pattern CHARGE_SUFFIX = Pattern.compile("\\(t?(\\d+)\\)\\s*$");
 
+	/** Player-owned-house instance regions - the "no session" reminder stays hidden here, the
+	 *  same set RuneLite's Discord plugin treats as "Player Owned House". */
+	private static final Set<Integer> POH_REGIONS =
+		Set.of(7534, 7535, 7790, 7791, 8046, 8047, 8302, 8303);
+
+	/** Grand Exchange region - the "no session" reminder stays hidden here too. */
+	private static final int GRAND_EXCHANGE_REGION = 12598;
+	/** How close (tiles) a bank booth / chest / banker keeps the "no session" reminder hidden. */
+	private static final int BANK_NEARBY_TILES = 12;
+
 	@Inject
 	private Client client;
 
@@ -183,6 +202,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	@Inject
 	private ProfitLossCalculatorOverlay overlay;
+
+	@Inject
+	private NoSessionOverlay noSessionOverlay;
 
 	@Inject
 	private SlayerPluginService slayerService;
@@ -301,6 +323,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	private final Map<Integer, DeathEntry> pendings = new LinkedHashMap<>();
 
+	// "no session" reminder: bank booths / chests / bankers on the current plane, rebuilt on
+	// every region load so the overlay can stay hidden near a bank without a per-frame scan.
+	private final Set<WorldPoint> bankTiles = new HashSet<>();
+	private final Map<Integer, Boolean> bankObjectIdCache = new HashMap<>();
+	private boolean bankScanQueued;
+
 	private volatile ProfitLossCalculatorPanel.View currentView = ProfitLossCalculatorPanel.View.builder().build();
 
 	@Provides
@@ -353,6 +381,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			.build();
 		clientToolbar.addNavigation(navButton);
 		overlayManager.add(overlay);
+		if (config.showNoSessionWarning())
+		{
+			overlayManager.add(noSessionOverlay);
+			bankScanQueued = true;
+		}
 
 		history.start();
 		history.load(this::pushHistory);
@@ -367,12 +400,15 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			stopSession();
 		}
 		overlayManager.remove(overlay);
+		overlayManager.remove(noSessionOverlay);
 		clientToolbar.removeNavigation(navButton);
 		logger.close();
 		history.stop();
 		panel = null;
 		session = null;
 		pendings.clear();
+		bankTiles.clear();
+		bankObjectIdCache.clear();
 	}
 
 	/** Lifetime history snapshot from the history executor - handed to the History tab.
@@ -440,12 +476,24 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		});
 	}
 
-	/** The Targeted-tab start button: begin a farm of {@code mob}. Ignored if a run is live. */
+	/** The Targeted-tab start button: begin a farm of {@code mobs} (usually one name; several
+	 *  when a collective label was picked). Ignored if a run is live. */
 	@Override
-	public void onStartFarm(String mob)
+	public void onStartFarm(List<String> mobs)
 	{
-		final String trimmed = mob == null ? "" : mob.trim();
-		if (trimmed.isEmpty())
+		final List<String> targets = new ArrayList<>();
+		if (mobs != null)
+		{
+			for (String m : mobs)
+			{
+				final String trimmed = m == null ? "" : m.trim();
+				if (!trimmed.isEmpty())
+				{
+					targets.add(trimmed);
+				}
+			}
+		}
+		if (targets.isEmpty())
 		{
 			return;
 		}
@@ -453,7 +501,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			if (session == null || sessionFinished)
 			{
-				startRun(Session.RunMode.TARGETED, Collections.singletonList(trimmed));
+				startRun(Session.RunMode.TARGETED, targets);
 			}
 		});
 	}
@@ -830,6 +878,40 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 	}
 
+	@Subscribe
+	public void onWorldViewLoaded(WorldViewLoaded event)
+	{
+		// the scene just (re)loaded - refresh the bank booth / chest / banker positions the
+		// "no session" reminder checks against, on the next tick when the scene is settled
+		if (config.showNoSessionWarning() && event.getWorldView().isTopLevel())
+		{
+			bankScanQueued = true;
+		}
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!ProfitLossCalculatorConfig.GROUP.equals(event.getGroup())
+			|| !"showNoSessionWarning".equals(event.getKey()))
+		{
+			return;
+		}
+		// Add / remove the overlay outright rather than leaving it registered and letting
+		// render() no-op, so turning the setting off clears it from the screen immediately.
+		if (config.showNoSessionWarning())
+		{
+			overlayManager.add(noSessionOverlay);
+			bankScanQueued = true;
+		}
+		else
+		{
+			overlayManager.remove(noSessionOverlay);
+			bankTiles.clear();
+			bankScanQueued = false;
+		}
+	}
+
 	/** A session exists and has not been stopped (may be paused). */
 	private boolean tracking()
 	{
@@ -915,6 +997,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		if (bankScanQueued)
+		{
+			bankScanQueued = false;
+			scanNearbyBanks();
+		}
+
 		// cheap field reads on the bundled Slayer plugin's own service - polled every tick
 		// (even idle) so the Slayer tab's task preview stays live before Start is pressed.
 		final boolean slayerOn = config.trackSlayerTask();
@@ -2168,6 +2256,155 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	boolean isSessionActive()
 	{
 		return session != null && !sessionFinished;
+	}
+
+	/** How long the "no session" reminder stays suppressed after the bank / deposit box closes,
+	 *  so it doesn't flicker on and off while you sort your inventory at a booth. */
+	private static final long BANK_GRACE_MS = 3000;
+	private long bankInterfaceSeenAt;
+
+	/**
+	 * Gate for the {@link NoSessionOverlay} "no session" reminder: nothing is being tracked
+	 * and the player is out in the world. Suppressed at a bank / deposit box (and for a few
+	 * seconds after it closes), within {@link #BANK_NEARBY_TILES} of a bank booth / chest /
+	 * banker, at the Grand Exchange, and inside a player-owned house - all ordinary places to
+	 * be standing around before a trip.
+	 */
+	boolean shouldWarnNoSession()
+	{
+		if (isSessionActive() || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return false;
+		}
+		final Player local = client.getLocalPlayer();
+		final LocalPoint loc = local == null ? null : local.getLocalLocation();
+		if (loc == null)
+		{
+			return false;
+		}
+		if (client.getWidget(InterfaceID.Bankmain.ITEMS) != null
+			|| client.getWidget(InterfaceID.BankDepositbox.INVENTORY) != null)
+		{
+			bankInterfaceSeenAt = System.currentTimeMillis();
+			return false;
+		}
+		if (System.currentTimeMillis() - bankInterfaceSeenAt < BANK_GRACE_MS)
+		{
+			return false;
+		}
+		final int region = WorldPoint.fromLocalInstance(client, loc).getRegionID();
+		if (region == GRAND_EXCHANGE_REGION || POH_REGIONS.contains(region))
+		{
+			return false;
+		}
+		return !nearBank(local.getWorldLocation());
+	}
+
+	/** Any tracked bank booth / chest / banker within {@link #BANK_NEARBY_TILES} of {@code here}. */
+	private boolean nearBank(WorldPoint here)
+	{
+		for (WorldPoint b : bankTiles)
+		{
+			if (b.getPlane() == here.getPlane() && b.distanceTo2D(here) <= BANK_NEARBY_TILES)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Rebuilds {@link #bankTiles} from the loaded scene (current plane) - bank booths / chests
+	 * and any banker NPCs. Runs once per region load off {@link #bankScanQueued}, never per
+	 * frame, so the reminder's proximity check stays a cheap walk of a handful of points.
+	 */
+	private void scanNearbyBanks()
+	{
+		bankTiles.clear();
+		final WorldView wv = client.getTopLevelWorldView();
+		if (client.getGameState() != GameState.LOGGED_IN || wv == null || wv.getScene() == null)
+		{
+			return;
+		}
+		final Tile[][] plane = wv.getScene().getTiles()[wv.getPlane()];
+		for (Tile[] col : plane)
+		{
+			for (Tile tile : col)
+			{
+				if (tile == null)
+				{
+					continue;
+				}
+				for (GameObject go : tile.getGameObjects())
+				{
+					if (go != null && isBankObject(go.getId()))
+					{
+						bankTiles.add(tile.getWorldLocation());
+						break;
+					}
+				}
+			}
+		}
+		for (NPC npc : wv.npcs())
+		{
+			if (isBanker(npc))
+			{
+				bankTiles.add(npc.getWorldLocation());
+			}
+		}
+	}
+
+	/** True for a bank booth / chest / table / deposit box. Result cached per object id (bank
+	 *  locs aren't varbit-swapped between bank and non-bank), so this decodes each id once. */
+	private boolean isBankObject(int id)
+	{
+		final Boolean cached = bankObjectIdCache.get(id);
+		if (cached != null)
+		{
+			return cached;
+		}
+		ObjectComposition comp = client.getObjectDefinition(id);
+		final boolean multiloc = comp != null && comp.getImpostorIds() != null;
+		if (multiloc && comp.getImpostor() != null)
+		{
+			comp = comp.getImpostor();
+		}
+		boolean bank = false;
+		if (comp != null && comp.getActions() != null)
+		{
+			final String name = comp.getName();
+			final boolean named = name != null && name.toLowerCase(Locale.ROOT).contains("bank");
+			for (String a : comp.getActions())
+			{
+				if ("Bank".equals(a) || (named && ("Use".equals(a) || "Deposit".equals(a))))
+				{
+					bank = true;
+					break;
+				}
+			}
+		}
+		if (!multiloc)
+		{
+			bankObjectIdCache.put(id, bank);
+		}
+		return bank;
+	}
+
+	private static boolean isBanker(NPC npc)
+	{
+		final NPCComposition c = npc == null ? null : npc.getTransformedComposition();
+		if (c == null || c.getActions() == null)
+		{
+			return false;
+		}
+		for (String a : c.getActions())
+		{
+			if ("Bank".equals(a))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	ProfitLossCalculatorPanel.View currentView()

@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.ToLongFunction;
 import lombok.Getter;
@@ -176,14 +177,28 @@ class Session
 		}
 	}
 
-	/** Exact, case-insensitive, tag-stripped NPC-name match. */
+	/**
+	 * Exact, case-insensitive, tag-stripped NPC-name match. A leading "The " is optional on
+	 * either side, so a farm typed as "The Kalphite Queen" (the Slayer assignment name) still
+	 * counts "Kalphite Queen" kills, and a farm of "Whisperer" still counts "The Whisperer".
+	 */
 	static boolean nameMatches(String candidate, String target)
 	{
 		if (candidate == null || target == null)
 		{
 			return false;
 		}
-		return Text.removeTags(candidate).trim().equalsIgnoreCase(target.trim());
+		return normalizeName(candidate).equals(normalizeName(target));
+	}
+
+	private static String normalizeName(String name)
+	{
+		String n = Text.removeTags(name).trim();
+		if (n.length() > 4 && n.regionMatches(true, 0, "the ", 0, 4))
+		{
+			n = n.substring(4).trim();
+		}
+		return n.toLowerCase(Locale.ROOT);
 	}
 
 	int nextDeathId()

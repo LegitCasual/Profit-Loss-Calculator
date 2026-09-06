@@ -43,8 +43,9 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		/** Session-tab flip button: start a plain session when idle, else pause / resume. */
 		void onStartPauseResume();
 
-		/** Targeted-tab start button: begin a farm of {@code mob}. */
-		void onStartFarm(String mob);
+		/** Targeted-tab start button: begin a farm of {@code mobs} (one name, or several when a
+		 *  collective label like "Moons of Peril" was picked). */
+		void onStartFarm(List<String> mobs);
 
 		/** Targeted-tab "Add mob" button: grow the current farm's target group. */
 		void onAddTargetMob(String mob);
@@ -118,7 +119,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		boolean returned;
 	}
 
-	/** One target mob's own block in a multi-target Boss Target Farm - only rendered when the
+	/** One target mob's own block in a multi-target Target Farm - only rendered when the
 	 *  farm has more than one target (a single-target farm looks exactly like it always has). */
 	@Value
 	static class MobFarmBlock
@@ -202,7 +203,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	}
 
 	private static final String MODE_SESSION = "Session";
-	private static final String MODE_TARGETED = "Boss Target Farm";
+	private static final String MODE_TARGETED = "Target Farm";
 	private static final String MODE_SLAYER = "Slayer";
 	private static final String CARD_MODES = "modes";
 	private static final String CARD_HISTORY = "history";

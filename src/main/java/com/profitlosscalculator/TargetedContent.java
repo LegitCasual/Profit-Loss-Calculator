@@ -20,7 +20,7 @@ import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 
 /**
- * The "Boss Target Farm" tab. Type a mob name, hit Start, and every kill of it is tracked
+ * The "Target Farm" tab. Type a mob name, hit Start, and every kill of it is tracked
  * individually - loot in, and every cost incurred while the farm runs charged against it. More
  * mobs can be added to the same farm at any time (the same field relabels to "Add mob" once
  * running) - each gets its own block with its own net and gain icon grid, stacked under a
@@ -73,15 +73,11 @@ class TargetedContent extends JPanel
 		final JPanel content = new JPanel();
 		content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
 
-		final JPanel search = new JPanel(new BorderLayout(4, 0));
-		search.setAlignmentX(LEFT_ALIGNMENT);
 		mobField.setToolTipText("Exact NPC name, e.g. Brutus - start typing for suggestions");
 		mobField.addActionListener(e -> submitMobField());
 		AutocompletePopup.attach(mobField, KnownMobNames.all());
 		startBtn.setFocusPainted(false);
 		startBtn.addActionListener(e -> submitMobField());
-		search.add(mobField, BorderLayout.CENTER);
-		search.add(startBtn, BorderLayout.EAST);
 
 		pauseBtn.setFocusPainted(false);
 		stopBtn.setFocusPainted(false);
@@ -98,7 +94,10 @@ class TargetedContent extends JPanel
 		hintLabel.setFont(FontManager.getRunescapeSmallFont());
 		hintLabel.setAlignmentX(LEFT_ALIGNMENT);
 
-		content.add(PanelUi.stretch(search));
+		// full-width search field with the Start farm / Add mob button stacked flush below it
+		content.add(PanelUi.stretch(mobField));
+		content.add(PanelUi.vgap(4));
+		content.add(PanelUi.stretch(startBtn));
 		content.add(PanelUi.vgap(4));
 		content.add(runButtons);
 		content.add(PanelUi.vgap(4));
@@ -133,7 +132,7 @@ class TargetedContent extends JPanel
 		content.add(PanelUi.vgap(8));
 
 		mobBlocksPanel.setLayout(new BoxLayout(mobBlocksPanel, BoxLayout.Y_AXIS));
-		section(mobBlocksSection, "Per boss", mobBlocksPanel);
+		section(mobBlocksSection, "Per mob", mobBlocksPanel);
 		killPanel.setLayout(new BoxLayout(killPanel, BoxLayout.Y_AXIS));
 		section(killSection, "Per kill", killPanel);
 		otherPanel.setLayout(new BoxLayout(otherPanel, BoxLayout.Y_AXIS));
@@ -154,21 +153,22 @@ class TargetedContent extends JPanel
 
 	/** The shared field/button pair: Start a new farm when idle, or add another mob to the
 	 *  group when one is already running/paused. Clears the field after a successful add so
-	 *  it's ready for the next name - "type, Add, type the next one, Add". */
+	 *  it's ready for the next name - "type, Add, type the next one, Add". A collective label
+	 *  ("Moons of Peril", ...) expands to all of its bosses at once. */
 	private void submitMobField()
 	{
-		final String mob = mobField.getText();
-		if (mob == null || mob.trim().isEmpty())
+		final java.util.List<String> mobs = KnownMobNames.expand(mobField.getText());
+		if (mobs.isEmpty())
 		{
 			return;
 		}
 		if (farmActive)
 		{
-			controls.onAddTargetMob(mob);
+			mobs.forEach(controls::onAddTargetMob);
 		}
 		else
 		{
-			controls.onStartFarm(mob);
+			controls.onStartFarm(mobs);
 		}
 		mobField.setText("");
 	}
@@ -204,7 +204,7 @@ class TargetedContent extends JPanel
 		hintLabel.setVisible(!hintLabel.getText().isEmpty());
 
 		titleLabel.setText(farm
-			? (multiTarget ? "Boss Target Farm · " + view.getMobBlocks().size() + " mobs" : view.getTitle())
+			? (multiTarget ? "Target Farm · " + view.getMobBlocks().size() + " mobs" : view.getTitle())
 				+ (view.getState().isEmpty() ? "" : "  ·  " + view.getState())
 			: "");
 		killsLabel.setText(farm && view.getKills() > 0

@@ -136,6 +136,17 @@ public class SessionHistoryTest
 	}
 
 	@Test
+	public void nameMatchTreatsLeadingTheAsOptional()
+	{
+		// the Slayer assignment name carries "The "; the NPC name does not (and vice versa)
+		assertTrue(Session.nameMatches("Kalphite Queen", "The Kalphite Queen"));
+		assertTrue(Session.nameMatches("The Whisperer", "Whisperer"));
+		assertTrue(Session.nameMatches("<col=00ffff>The Nightmare</col>", "the nightmare"));
+		// "The" must be a whole leading word - not part of another name
+		assertTrue(!Session.nameMatches("Theatre usher", "atre usher"));
+	}
+
+	@Test
 	public void slayerRunsGetAPerKillRateLikeFarms()
 	{
 		RunRecord slayer = run("slayer", "2026-01-01T00:00:00Z",

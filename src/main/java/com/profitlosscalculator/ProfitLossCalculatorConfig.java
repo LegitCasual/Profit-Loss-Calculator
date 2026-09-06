@@ -48,9 +48,20 @@ public interface ProfitLossCalculatorConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "showNoSessionWarning",
+		name = "\"No session\" reminder",
+		description = "Show a red \"No profit loss session started\" note at the top-right whenever nothing is being tracked and you are not at a bank or in a house.",
+		position = 6
+	)
+	default boolean showNoSessionWarning()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "showIncomeList",
 		name = "Show income list (Session tab)",
-		description = "On the Session tab, also show income grouped one row per source. The Boss Target Farm tab always shows its 'Other income'.",
+		description = "On the Session tab, also show income grouped one row per source. The Target Farm tab always shows its 'Other income'.",
 		position = 4
 	)
 	default boolean showIncomeList()
