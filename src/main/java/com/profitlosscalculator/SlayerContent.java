@@ -163,7 +163,7 @@ class SlayerContent extends JPanel
 		pauseBtn.setText(view.isPaused() ? "Resume" : "Pause");
 
 		hintLabel.setText(otherModeActive
-			? (view.isTargeted() ? "A Boss Target Farm is running - see the Boss Target Farm tab"
+			? (view.isTargeted() ? "A Target Farm is running - see the Target Farm tab"
 				: "A session is running - stop it to start Slayer tracking")
 			: slayer || hasTask ? ""
 			: "No Slayer task detected - get one from a Slayer Master");

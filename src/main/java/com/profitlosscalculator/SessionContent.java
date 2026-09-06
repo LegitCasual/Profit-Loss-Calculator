@@ -159,7 +159,7 @@ class SessionContent extends JPanel
 		statGrid.setVisible(sessionShowing);
 		noSessionLabel.setVisible(!sessionShowing);
 		noSessionLabel.setText(otherModeActive
-			? (view.isTargeted() ? "A Boss Target Farm is running - see the Boss Target Farm tab"
+			? (view.isTargeted() ? "A Target Farm is running - see the Target Farm tab"
 				: "A Slayer task is running - see the Slayer tab")
 			: "No session");
 

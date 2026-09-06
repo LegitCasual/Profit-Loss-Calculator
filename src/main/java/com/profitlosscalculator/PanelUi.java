@@ -181,7 +181,7 @@ final class PanelUi
 		return row;
 	}
 
-	/** One target mob's block in a multi-target Boss Target Farm: name/kills header, net
+	/** One target mob's block in a multi-target Target Farm: name/kills header, net
 	 *  right-aligned and coloured, a "gained X · cost Y" sub-line, gp/kill, and that mob's own
 	 *  gain icon grid (losses stay a farm-wide figure - cost isn't tracked per item per mob). */
 	static JPanel mobFarmBlock(ProfitLossCalculatorPanel.MobFarmBlock mb, ItemManager itemManager)
