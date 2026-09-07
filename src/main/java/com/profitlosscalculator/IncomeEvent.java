@@ -44,7 +44,9 @@ class IncomeEvent
 		/** Taken off the ground, not attributable to one of your own kills. */
 		PICKUP,
 		/** Coins from a High Alchemy cast. */
-		ALCH
+		ALCH,
+		/** An item produced by a skilling action (a bow fletched, a bar smithed, an ore mined). */
+		SKILLING
 	}
 
 	private final Type type;
@@ -67,7 +69,7 @@ class IncomeEvent
 		this.items = Collections.unmodifiableMap(new LinkedHashMap<>(items));
 		if (type != Type.NPC_LOOT && type != Type.PLAYER_LOOT)
 		{
-			// rewards / pickpockets / deliberate pickups are already in hand
+			// rewards / pickpockets / deliberate pickups / skilling output are already in hand
 			this.collected.putAll(this.items);
 		}
 	}

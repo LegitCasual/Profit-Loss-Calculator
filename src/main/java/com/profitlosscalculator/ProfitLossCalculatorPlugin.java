@@ -44,6 +44,7 @@ import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
+import net.runelite.api.Skill;
 import net.runelite.api.Tile;
 import net.runelite.api.WorldView;
 import net.runelite.api.coords.LocalPoint;
@@ -57,6 +58,7 @@ import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcSpawned;
+import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WorldViewLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
@@ -90,7 +92,7 @@ import net.runelite.client.util.Text;
 @PluginDescriptor(
 	name = "Profit Loss Calculator",
 	description = "Profit / loss for a play session - loot and pickups in, supplies / spells / teleports / ammo / deaths out - with a boss kill tally and a JSON log",
-	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income", "slayer", "targeted"}
+	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income", "slayer", "targeted", "skilling"}
 )
 @PluginDependency(SlayerPlugin.class)
 public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalculatorPanel.Controls
@@ -267,6 +269,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private final ChargedWeaponTracker chargedWeaponTracker = new ChargedWeaponTracker();
 	/** running charged-weapon gp already charged to a mob - the delta is attributed each attack. */
 	private long chargedWeaponGpCharged;
+
+	/** Non-combat skill XP watcher - tells {@link #reconcileSkilling} which ticks were a
+	 *  skilling action so the inventory diff can be booked as that skill's materials / product.
+	 *  Plain session only. */
+	private final SkillingTracker skillingTracker = new SkillingTracker();
 
 	// income tracking
 	/** decides how much of each drop actually reached the bag ("collected") vs stayed on
@@ -642,6 +649,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		ammoTracker.reset(ammoOwned());
 		chargedWeaponTracker.reset();
+		skillingTracker.reset(currentSkillXp());
 		pickupTracker.reset();
 		lootCollector.clear();
 		dropIntent.clear();
@@ -684,6 +692,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		session.setPaused(paused);
 		// re-base the trackers past the paused stretch so banking / afk doesn't accrue
 		ammoTracker.reset(ammoOwned());
+		skillingTracker.reset(currentSkillXp());
 		pickupTracker.reset();
 		prevTickItems = trackedItems();
 		if (!paused && session.isSlayer())
@@ -875,6 +884,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		if (state == GameState.LOGIN_SCREEN || state == GameState.HOPPING || state == GameState.CONNECTION_LOST)
 		{
 			bankOpen = false;
+			// drop the skill-XP baseline - a relogin fires a StatChanged storm with the real
+			// totals, which would otherwise register as one huge "action" per skill
+			skillingTracker.reset(Collections.emptyMap());
 		}
 	}
 
@@ -995,6 +1007,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	}
 
 	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		// always fed in (even idle) so the XP baseline stays current; reconcileSkilling reads
+		// the active skill off it once per tick
+		skillingTracker.record(event.getSkill(), event.getXp(), client.getTickCount());
+	}
+
+	/** Current total XP of every tracked skill, for seeding {@link #skillingTracker}. Empty
+	 *  when not logged in - the tracker then re-seeds off the next {@code StatChanged}. */
+	private Map<Skill, Integer> currentSkillXp()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return Collections.emptyMap();
+		}
+		final Map<Skill, Integer> out = new HashMap<>();
+		for (Skill s : SkillingTracker.TRACKED)
+		{
+			out.put(s, client.getSkillExperience(s));
+		}
+		return out;
+	}
+
+	@Subscribe
 	public void onGameTick(GameTick event)
 	{
 		if (bankScanQueued)
@@ -1046,11 +1082,18 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			{
 				detectTeleports(prevTickItems, curItems);
 			}
-			trackDrops(ContainerSnapshot.lost(prevTickItems, curItems));
+			final Map<Integer, Integer> losses = ContainerSnapshot.lost(prevTickItems, curItems);
+			trackDrops(losses);
 			final Map<Integer, Integer> gains = ContainerSnapshot.lost(curItems, prevTickItems);
 			if (!gains.isEmpty())
 			{
 				reconcileIncome(gains);
+			}
+			// whatever inventory movement the loot / pickup / drop logic above didn't claim,
+			// on a tick a tracked skill gained XP, is that skill's materials / product
+			if (config.trackSkilling())
+			{
+				reconcileSkilling(gains, losses);
 			}
 		}
 		prevTickItems = curItems;
@@ -1615,6 +1658,109 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			g.setValue(g.getValue() - take);
 			return g.getValue() <= 0;
 		});
+	}
+
+	// ------------------------------------------------------------------ skilling
+
+	/** Rune item ids - never a skilling material (a manual cast already books its runes, and
+	 *  no skilling method consumes a rune), so they are kept out of skilling attribution. */
+	private static final Set<Integer> RUNE_ITEM_IDS;
+
+	static
+	{
+		final Set<Integer> ids = new HashSet<>();
+		for (Rune r : Rune.values())
+		{
+			ids.add(r.getItemId());
+		}
+		RUNE_ITEM_IDS = Collections.unmodifiableSet(ids);
+	}
+
+	/**
+	 * Plain-session only: on a tick a tracked non-combat skill gained XP, book the inventory /
+	 * worn / rune-pouch movement the loot / pickup / drop logic left behind as that skill's
+	 * product (in) and materials (out). {@code gains} has already been drawn down by
+	 * {@link #reconcileIncome}; {@code losses} is this tick's raw shrinkage.
+	 */
+	private void reconcileSkilling(Map<Integer, Integer> gains, Map<Integer, Integer> losses)
+	{
+		if (session == null || session.isGrouped())
+		{
+			return;
+		}
+		final Skill skill = skillingTracker.activeSkill(client.getTickCount());
+		if (skill == null)
+		{
+			return;
+		}
+		final String src = skill.getName();
+
+		final Map<Integer, Integer> products = new LinkedHashMap<>();
+		gains.forEach((id, qty) ->
+		{
+			if (qty > 0 && !isSkillingExcluded(id))
+			{
+				products.merge(id, qty, Integer::sum);
+			}
+		});
+
+		final Map<Integer, Integer> materials = new LinkedHashMap<>();
+		losses.forEach((id, qty) ->
+		{
+			// a pending manual "Drop" of this id is the drop tracker's, not a skilling material
+			if (qty > 0 && !dropIntent.containsKey(id) && !isSkillingExcluded(id))
+			{
+				materials.merge(id, qty, Integer::sum);
+			}
+		});
+
+		if (products.isEmpty() && materials.isEmpty())
+		{
+			return;
+		}
+
+		long productGp = 0;
+		if (!products.isEmpty())
+		{
+			session.add(new IncomeEvent(IncomeEvent.Type.SKILLING, Instant.now(), src, products));
+			productGp = lootValue(products);
+		}
+
+		long materialGp = 0;
+		for (Map.Entry<Integer, Integer> e : materials.entrySet())
+		{
+			final long gp = IncomeValuation.value(e.getKey(), e.getValue(),
+				IncomeValuation.Mode.GE, priceLookup);
+			session.add(new CostEvent(CostEvent.Type.SKILLING, Instant.now(),
+				e.getKey(), e.getValue(), gp, itemName(e.getKey()), null));
+			// attribute to the skill name (not costMob()) so History merges gained + cost into
+			// one row and costByMob still totals to Session#total()
+			session.addMobCost(src, gp);
+			materialGp += gp;
+		}
+
+		logger.line("skilling")
+			.put("skill", src)
+			.put("products", products.isEmpty() ? null : namedItems(products))
+			.put("productGp", productGp)
+			.put("materials", materials.isEmpty() ? null : namedItems(materials))
+			.put("materialGp", materialGp)
+			.submit();
+		viewDirty = true;
+	}
+
+	/**
+	 * Ids kept out of skilling attribution: runes (a manual cast books them; no skilling
+	 * method consumes a rune), ammo this session has actually fired (its fired / recovered
+	 * tally owns that id - so fletching darts you're also shooting doesn't double up, but
+	 * smithing cannonballs you never fire still counts), and teleport tablets. Everything
+	 * else - including ammo you make but don't fire - is fair game.
+	 */
+	private boolean isSkillingExcluded(int id)
+	{
+		return RUNE_ITEM_IDS.contains(id)
+			|| session.getAmmoStats().containsKey(id)
+			|| isTeleportTab(id);
 	}
 
 	private long lootValue(Map<Integer, Integer> items)
@@ -2686,7 +2832,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		return gridItems(qty, this::lootValue);
 	}
 
-	/** Red grid: everything consumed - supplies, teleports, ammo, runes - always GE priced. */
+	/** Red grid: everything consumed - supplies, teleports, ammo, runes, skilling materials -
+	 *  always GE priced. */
 	private List<ProfitLossCalculatorPanel.GridItem> lossGridItems()
 	{
 		final Map<Integer, Integer> qty = new LinkedHashMap<>();
@@ -2695,6 +2842,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			if (e.getType() == CostEvent.Type.CONSUMABLE || e.getType() == CostEvent.Type.TELEPORT)
 			{
 				qty.merge(ItemVariationMapping.map(e.getItemId()), e.getQuantity(), Integer::sum);
+			}
+			else if (e.getType() == CostEvent.Type.SKILLING)
+			{
+				// keep the exact item - a raw shark is not an anchovy
+				qty.merge(e.getItemId(), e.getQuantity(), Integer::sum);
 			}
 		}
 		session.getRunesUsed().forEach((id, q) -> qty.merge(id, q, Integer::sum));
@@ -2870,6 +3022,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				return "pickpocket";
 			case ALCH:
 				return "alch";
+			case SKILLING:
+				return "skilling_gain";
 			case PICKUP:
 			default:
 				return "pickup";
@@ -2905,6 +3059,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				case TELEPORT:
 					kind = "teleport";
 					label = ev.getLabel();
+					break;
+				case SKILLING:
+					kind = "skilling";
+					label = ev.getQuantity() > 1 ? ev.getQuantity() + "× " + ev.getLabel() : ev.getLabel();
 					break;
 				default:
 					kind = "supplies";

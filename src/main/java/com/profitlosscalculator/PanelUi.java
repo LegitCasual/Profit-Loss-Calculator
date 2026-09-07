@@ -37,6 +37,7 @@ final class PanelUi
 	static final Color SPELL_COLOR = new Color(180, 140, 255);
 	static final Color TELEPORT_COLOR = new Color(120, 220, 200);
 	static final Color AMMO_COLOR = new Color(230, 190, 110);
+	static final Color SKILLING_COLOR = new Color(200, 165, 120);
 	static final Color DEATH_COLOR = ColorScheme.PROGRESS_ERROR_COLOR;
 	static final Color GAIN_COLOR = new Color(120, 210, 140);
 	static final Color LOSS_COLOR = new Color(225, 120, 120);
@@ -60,6 +61,8 @@ final class PanelUi
 				return TELEPORT_COLOR;
 			case "ammo":
 				return AMMO_COLOR;
+			case "skilling":
+				return SKILLING_COLOR;
 			case "death":
 				return DEATH_COLOR;
 			case "npc_loot":
@@ -68,6 +71,7 @@ final class PanelUi
 			case "pickpocket":
 			case "pickup":
 			case "alch":
+			case "skilling_gain":
 				return GAIN_COLOR;
 			default:
 				return SUPPLIES_COLOR;

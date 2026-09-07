@@ -283,6 +283,12 @@ class Session
 		return typeTotal(CostEvent.Type.TELEPORT);
 	}
 
+	/** gp of materials consumed by skilling actions this session (plain session only). */
+	long skillingTotal()
+	{
+		return typeTotal(CostEvent.Type.SKILLING);
+	}
+
 	private long typeTotal(CostEvent.Type type)
 	{
 		return events.stream()
@@ -312,11 +318,12 @@ class Session
 		return deaths.stream().mapToLong(DeathEntry::atRiskValue).sum();
 	}
 
-	/** Total gp spent this session (supplies, spells, teleports, ammo, weapon charges, deaths). */
+	/** Total gp spent this session (supplies, spells, teleports, ammo, weapon charges, skilling
+	 *  materials, deaths). */
 	long total()
 	{
 		return consumableTotal() + spellTotal() + teleportTotal() + ammoTotal()
-			+ chargedWeaponTotal() + confirmedDeathTotal();
+			+ chargedWeaponTotal() + skillingTotal() + confirmedDeathTotal();
 	}
 
 	/**

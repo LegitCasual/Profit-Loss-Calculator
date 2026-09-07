@@ -187,11 +187,23 @@ public interface ProfitLossCalculatorConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "trackSkilling",
+		name = "Track skilling",
+		description = "In a plain Session, count materials consumed and items produced while training a non-combat skill (fishing, mining, smithing, fletching, cooking, ...) as cost and income. Best-effort: gated on a skill XP gain that tick. Farming, Agility, Thieving and Magic-only methods are not covered. Not tracked during a Target Farm or Slayer run.",
+		section = incomeSection,
+		position = 2
+	)
+	default boolean trackSkilling()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "countUncollectedDrops",
 		name = "Count uncollected drops",
 		description = "Count the full value of everything that dropped toward profit, even loot left on the ground. Off = only loot you actually picked up counts; the rest shows as 'potential'.",
 		section = incomeSection,
-		position = 2
+		position = 3
 	)
 	default boolean countUncollectedDrops()
 	{
@@ -203,7 +215,7 @@ public interface ProfitLossCalculatorConfig extends Config
 		name = "Value loot at",
 		description = "GE price, High Alchemy value, or whichever is higher. Coins are always face value. Cost is always GE priced.",
 		section = incomeSection,
-		position = 3
+		position = 4
 	)
 	default IncomeValuation.Mode incomeValuation()
 	{
@@ -216,7 +228,7 @@ public interface ProfitLossCalculatorConfig extends Config
 		name = "Hide loot under (gp)",
 		description = "Drops worth less than this are left out of the income list and the totals. 0 shows everything.",
 		section = incomeSection,
-		position = 4
+		position = 5
 	)
 	default int ignoreIncomeBelow()
 	{

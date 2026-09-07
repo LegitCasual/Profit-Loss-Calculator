@@ -88,6 +88,25 @@ public class SessionSummaryTest
 	}
 
 	@Test
+	public void skillingMaterialsCountTowardCostAndNet()
+	{
+		Session s = new Session(Instant.now());
+		s.add(event(CostEvent.Type.SKILLING, 8_000));   // e.g. 100 yew logs fletched
+		s.add(event(CostEvent.Type.SKILLING, 1_500));   // + bowstrings
+
+		IncomeEvent bows = new IncomeEvent(IncomeEvent.Type.SKILLING, Instant.now(), "Fletching", map(855, 100));
+		s.add(bows);   // skilling output is fully collected on creation
+		final long collected = s.incomeTotal(COLLECTED);   // 100 * 200 = 20,000
+
+		SessionSummary summary = SessionSummary.of(s, collected, collected);
+		assertEquals(9_500, summary.getSkilling());
+		assertEquals(9_500, summary.total());
+		assertEquals(20_000 - 9_500, summary.net());
+		assertEquals(9_500L, summary.toJsonFields().get("skilling"));
+		assertTrue(summary.toPlainText().contains("skilling"));
+	}
+
+	@Test
 	public void confirmedFeeCountsGravestoneZeroDoesNot()
 	{
 		Session s = new Session(Instant.now());
