@@ -22,13 +22,15 @@ class CostEvent
 	{
 		CONSUMABLE,
 		SPELL,
-		TELEPORT
+		TELEPORT,
+		/** A material consumed by a skilling action (a log fletched, an ore smithed, a bone buried). */
+		SKILLING
 	}
 
 	Type type;
 	Instant time;
 
-	/** Item consumed (CONSUMABLE/TELEPORT), or -1 for SPELL. */
+	/** Item consumed (CONSUMABLE/TELEPORT/SKILLING), or -1 for SPELL. */
 	int itemId;
 	int quantity;
 

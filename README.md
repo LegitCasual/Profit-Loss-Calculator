@@ -19,8 +19,9 @@ floor. (Turn on *Count uncollected drops* to make the full drop count instead.)
 There are three ways to track, one at a time:
 
 - **Session** - a flat "record my profit / loss for this stretch of time" run. Loot in,
-  supplies out, one net number on the tab. Behind the scenes it still splits per mob and
-  feeds that into the History tab.
+  supplies out, one net number on the tab. This is also the only mode that tracks **skilling**
+  (materials consumed out, product made in). Behind the scenes it still splits per mob / skill
+  and feeds that into the History tab.
 - **Target Farm** - you type a mob name and every kill of it is tracked individually,
   giving you a real **GP per kill**. You can add more names to the same farm at any point
   without stopping - each one gets its own block with its own net and gain icon grid, stacked
@@ -145,6 +146,16 @@ Sections with nothing in them are hidden.
 - **High Alchemy** - the coins a High Alch cast produces are booked as income (the rune
   cost is charged separately, so the row nets out to the real alch profit). Alching while
   fighting counts toward that mob; otherwise it collects in a "High alch" line.
+- **Skilling** *(Session mode, `Track skilling` on)* - while a plain Session runs, any tick
+  that gives XP in a tracked non-combat skill (Mining, Fishing, Woodcutting, Hunter, Cooking,
+  Firemaking, Smithing, Crafting, Fletching, Herblore, Runecraft, Construction, Prayer) has
+  its inventory / worn / rune-pouch change booked to that skill: what left is a **cost**
+  (logs, ores, bars, secondaries, bones, ...), what arrived is **income** (the product) -
+  each attributed to the skill name, so History keeps one lifetime row per skill. Cost is GE
+  priced; the product uses your chosen loot valuation. Runes, teleport charges, and ammo
+  you're also firing this session are excluded (priced by their own paths) - but ammo you
+  fletch/smith and *don't* fire counts as a product. Not tracked during a Target Farm or
+  Slayer run.
 
 Loot is valued at the **GE price**, the **High Alchemy value**, or **whichever is higher** -
 your choice in the config. Coins are always face value. It is a snapshot at the moment of
@@ -172,6 +183,8 @@ last week's prices keeps last week's values.
   (ancient essence), **Eye of Ayak** (demon tears), **Tumeken's shadow** (soul + chaos
   runes). Counted from the attack animation - one attack, one charge - so autocasting counts
   and recharging never looks like use.
+- **Skilling materials** - in a plain Session with *Track skilling* on, anything a skilling
+  action consumes (see *Income → Skilling*), GE priced.
 - **Deaths** - a pending entry the moment you die. When the lost items come back the
   plugin reads the Death's Office fee from chat (or estimates it from the modern
   Item Retrieval tiers) and you confirm or zero it (gravestone) in the panel. Never
@@ -191,13 +204,19 @@ Files under `.runelite/profit-loss-calculator/`:
   is kept as `history-v1-backup.jsonl`.
 - **`session-<timestamp>.jsonl`** (with *Write session log file* enabled) - the detailed
   event stream for all three modes: session start/pause/resume/stop, consumable, spell,
-  teleport, kill, loot, death pending/returned/resolved. The `session_stop` line carries
-  the full summary, a per-kill breakdown and the per-mob rollup.
+  teleport, skilling, kill, loot, death pending/returned/resolved. The `session_stop` line
+  carries the full summary (cost split now including `skilling`), a per-kill breakdown and
+  the per-mob rollup.
 
 ## Known limitations
 
-- Skilling gathering (fishing, mining, woodcutting, farming, hunter) is **not** counted as
-  income - none of it raises a loot event and there is no heuristic for it yet.
+- **Skilling** (Session mode only) is caught by watching for a non-combat skill XP gain and
+  booking that tick's inventory change as the skill's materials / product (see
+  *Income → Skilling*). It is best-effort: an item change more than one tick from the XP tick
+  is missed; Farming (XP lands long after the seed cost), Agility, Thieving and Magic-only
+  methods (plank make, tan leather, string jewellery, ...) are not covered; a stack you
+  fletch and later fire as ammo is counted on both sides. Off during a Target Farm / Slayer
+  run.
 - Income value is a GE/alch snapshot at receipt, not realised sale proceeds.
 - "Collected" leans on watching items enter the inventory shortly after they drop. Loot
   picked up much later (full inventory, came back for it) may stay counted as potential
@@ -219,7 +238,8 @@ Files under `.runelite/profit-loss-calculator/`:
   optional). Multi-part bosses whose name changes between phases, or where two die close
   together with a single loot event, can miscount a kill despite the short debounce.
 - A Target Farm's net only includes its targets. Stray loot shows under *Other income*
-  but is not netted, and skilling / clue steps done mid-farm are not counted.
+  but is not netted, and skilling (Session-mode only) / clue steps done mid-farm are not
+  counted.
 - A farm's per-mob blocks only show a **gain** icon grid - the loss grid stays a farm-wide
   figure, since cost is tracked as a gp total per mob, not per item per mob.
 - Slayer task detection relies entirely on RuneLite's own built-in **Slayer** plugin (task
