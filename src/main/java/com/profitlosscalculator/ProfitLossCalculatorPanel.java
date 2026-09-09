@@ -158,13 +158,23 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		long elapsedSeconds;
 		long gains;
 		long losses;
+		/** Potential net: collected loot at GE snapshot − cost. The "if I sold it all now" figure. */
 		long net;
+		/** Actual net: what the run has really made so far - realised (alched / sold) proceeds
+		 *  plus loot still held at GE, minus cost. Equals {@link #net} until something is cashed
+		 *  out. A live hint; the History tab is the source of truth. */
+		long actualNet;
 		long netPerHour;
 		long gpPerKill;
 		/** Targeted farm / Slayer task: run seconds / kills - the average time per kill. */
 		long secPerKill;
 		long potential;
 		long atRisk;
+		/** Live only: value High Alched, and net value moved to a bank, during this run so far
+		 *  (0 unless you actually alched / banked mid-run). Realised / banked totals proper live
+		 *  in the History tab. */
+		long realisedSoFar;
+		long bankedSoFar;
 		boolean showIncomeList;
 		boolean showCostList;
 		@Singular
@@ -205,13 +215,14 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	private static final String MODE_SESSION = "Session";
 	private static final String MODE_TARGETED = "Target Farm";
 	private static final String MODE_SLAYER = "Slayer";
+	private static final String MODE_ITEMS = "Items";
 	private static final String CARD_MODES = "modes";
 	private static final String CARD_HISTORY = "history";
 
 	private final Controls controls;
 
 	private final JButton historyBtn = new JButton("History");
-	private final JComboBox<String> modeSelector = new JComboBox<>(new String[]{MODE_SESSION, MODE_TARGETED, MODE_SLAYER});
+	private final JComboBox<String> modeSelector = new JComboBox<>(new String[]{MODE_SESSION, MODE_TARGETED, MODE_SLAYER, MODE_ITEMS});
 	private final CardLayout modeLayout = new CardLayout();
 	private final JPanel modeHost = new JPanel(modeLayout);
 	private final CardLayout bodyLayout = new CardLayout();
@@ -222,6 +233,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	private final TargetedContent targetedContent;
 	private final SlayerContent slayerContent;
 	private final HistoryContent historyContent;
+	private final ItemsContent itemsContent;
 
 	/** Holds the nav bar + body. Swapped out for {@link #welcome} on first run. */
 	private final JPanel contentHost = new JPanel(new BorderLayout());
@@ -234,6 +246,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		this.targetedContent = new TargetedContent(controls, itemManager);
 		this.slayerContent = new SlayerContent(controls, itemManager);
 		this.historyContent = new HistoryContent(controls, itemManager);
+		this.itemsContent = new ItemsContent(itemManager);
 
 		setLayout(new BorderLayout());
 
@@ -241,7 +254,15 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		historyBtn.addActionListener(e -> toggleHistory());
 
 		modeSelector.setFocusable(false);
-		modeSelector.addActionListener(e -> modeLayout.show(modeHost, (String) modeSelector.getSelectedItem()));
+		modeSelector.addActionListener(e ->
+		{
+			final String pick = (String) modeSelector.getSelectedItem();
+			modeLayout.show(modeHost, pick);
+			if (MODE_ITEMS.equals(pick))
+			{
+				controls.onRefreshHistory();
+			}
+		});
 
 		final JPanel navBar = new JPanel();
 		navBar.setLayout(new BoxLayout(navBar, BoxLayout.Y_AXIS));
@@ -253,6 +274,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		modeHost.add(sessionContent, MODE_SESSION);
 		modeHost.add(targetedContent, MODE_TARGETED);
 		modeHost.add(slayerContent, MODE_SLAYER);
+		modeHost.add(itemsContent, MODE_ITEMS);
 
 		bodyHost.add(modeHost, CARD_MODES);
 		bodyHost.add(historyContent, CARD_HISTORY);
@@ -298,6 +320,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	void renderHistory(SessionHistory.Snapshot lifetime, java.util.Map<Integer, String> itemNames)
 	{
 		historyContent.render(lifetime, itemNames);
+		itemsContent.render(lifetime, itemNames);
 	}
 
 	void render(View view)

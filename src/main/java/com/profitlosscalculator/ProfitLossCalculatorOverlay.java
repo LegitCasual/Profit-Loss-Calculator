@@ -48,13 +48,22 @@ class ProfitLossCalculatorOverlay extends OverlayPanel
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text(v.getTitle() + (v.isPaused() ? " (paused)" : ""))
 			.build());
+		if (v.getRealisedSoFar() > 0 || v.getBankedSoFar() > 0)
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Actual net")
+				.right(gp(v.getActualNet()))
+				.rightColor(v.getActualNet() >= 0
+					? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR)
+				.build());
+		}
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Net")
+			.left("Potential net")
 			.right(gp(v.getNet()))
 			.rightColor(netColor)
 			.build());
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Picked up")
+			.left("Potential")
 			.right(gp(v.getGains()))
 			.build());
 		if (v.getPotential() != v.getGains())

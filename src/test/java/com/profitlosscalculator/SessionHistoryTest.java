@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -155,5 +156,128 @@ public class SessionHistoryTest
 
 		SessionHistory.MobStats m = s.getMobs().get(0);
 		assertEquals(600 / 10, m.getSecPerKill());
+	}
+
+	// ------------------------------------------------------------------ global-by-item realised
+
+	private static SessionHistory.RealisedEntry re(String kind, int itemId, long qty, long gross,
+		long tax, long projected, String at)
+	{
+		return new SessionHistory.RealisedEntry(1, kind, null, null, itemId, qty, gross, tax,
+			gross - tax, projected, at);
+	}
+
+	private static SessionHistory.BankEntry bank(int itemId, long signedQty, long unit)
+	{
+		return new SessionHistory.BankEntry(1, null, null, itemId, signedQty, unit, "t");
+	}
+
+	private static SessionHistory.ItemStat item(SessionHistory.Snapshot s, int id)
+	{
+		return s.getItems().stream().filter(i -> i.getItemId() == id).findFirst().orElse(null);
+	}
+
+	@Test
+	public void lootedOfSumsAcrossEveryRunAndMob()
+	{
+		RunRecord a = run("farm", "2026-01-01T00:00:00Z",
+			"Brutus", mob(1, 60_000, 0, new long[]{536, 15, 60_000}));   // 15 @ 4000
+		RunRecord b = run("session", "2026-01-02T00:00:00Z",
+			"Cow", mob(1, 4_000, 0, new long[]{536, 30, 90_000}),        // 30 @ 3000
+			"Goblin", mob(1, 0, 0));
+		long[] lt = SessionHistory.lootedOf(Arrays.asList(a, b), 536);
+		assertEquals(45, lt[0]);
+		assertEquals(150_000, lt[1]);
+	}
+
+	@Test
+	public void itemLedgerCapsSoldAtLootedAndProRatesProceeds()
+	{
+		// looted 15 T-bone worth 4000 each; sold 20 for 60k net (3k each)
+		RunRecord r = run("farm", "2026-01-01T00:00:00Z",
+			"Brutus", mob(10, 60_000, 0, new long[]{536, 15, 60_000}));
+		SessionHistory.Snapshot s = SessionHistory.aggregate(Collections.singletonList(r),
+			Collections.singletonList(re("ge", 536, 20, 63_000, 3_000, 60_000, "t")),
+			Collections.emptyList());
+
+		SessionHistory.ItemStat st = item(s, 536);
+		assertEquals(15, st.getLootedQty());
+		assertEquals(20, st.getSoldQty());
+		assertEquals(15, st.getEffectiveSold());              // capped at looted
+		assertEquals(0, st.getUnsoldQty());
+		assertEquals(60_000 * 15 / 20, st.getSoldNet());      // 45k - pro-rated to 15
+		assertEquals(45_000, s.getRealisedNet());
+		assertEquals(45_000, s.getActualNet());               // all sold, no cost
+	}
+
+	@Test
+	public void itemLedgerLeavesUnsoldAtSnapshotValue()
+	{
+		// looted 15 @ 4000 = 60k potential, cost 10k; sell 8 for 30k net
+		RunRecord r = run("farm", "2026-01-01T00:00:00Z",
+			"Brutus", mob(10, 60_000, 10_000, new long[]{536, 15, 60_000}));
+		SessionHistory.Snapshot s = SessionHistory.aggregate(Collections.singletonList(r),
+			Collections.singletonList(re("ge", 536, 8, 31_000, 1_000, 32_000, "t")),
+			Collections.emptyList());
+
+		SessionHistory.ItemStat st = item(s, 536);
+		assertEquals(8, st.getEffectiveSold());
+		assertEquals(7, st.getUnsoldQty());
+		assertEquals(28_000, st.getUnsoldValue());            // 7 * 4000
+		assertEquals(60_000 - 10_000, s.getNet());            // potential net unchanged
+		assertEquals(30_000 + 28_000 - 10_000, s.getActualNet());   // realised + unsold - cost
+	}
+
+	@Test
+	public void bankedValueClampsToUnsoldGlobally()
+	{
+		RunRecord r = run("farm", "2026-01-01T00:00:00Z",
+			"Brutus", mob(10, 100_000, 0, new long[]{536, 100, 100_000}));   // 100 @ 1000
+		List<SessionHistory.BankEntry> banked = Arrays.asList(
+			bank(536, 80, 1_000), bank(536, -10, 1_000));   // net 70 banked
+		List<SessionHistory.RealisedEntry> realised = Collections.singletonList(
+			re("ge", 536, 40, 40_000, 0, 40_000, "t"));      // 40 sold -> 60 unsold
+
+		SessionHistory.Snapshot s = SessionHistory.aggregate(
+			Collections.singletonList(r), realised, banked);
+		assertEquals(60_000, s.getBankedValue());             // min(70, 60) * 1000
+	}
+
+	@Test
+	public void round18RealisedLineStillFoldsByItemId()
+	{
+		RunRecord r = run("farm", "2026-01-01T00:00:00Z",
+			"Vorkath", mob(1, 10_000, 0, new long[]{536, 10, 10_000}));
+		// a round-19 line carries runStart + mob; the new aggregate ignores them and sums by itemId
+		SessionHistory.RealisedEntry old = new SessionHistory.RealisedEntry(
+			1, "ge", "2026-01-01T00:00:00Z", "Vorkath", 536, 4, 4_100, 100, 4_000, 4_000, "t");
+		SessionHistory.Snapshot s = SessionHistory.aggregate(Collections.singletonList(r),
+			Collections.singletonList(old), Collections.emptyList());
+		assertEquals(4_000, s.getRealisedNet());
+		assertEquals(4, item(s, 536).getEffectiveSold());
+	}
+
+	@Test
+	public void realisedEntryWithoutKindReadsAsGe()
+	{
+		SessionHistory.RealisedEntry old =
+			new SessionHistory.RealisedEntry(1, null, null, null, 536, 1, 100, 2, 98, 100, "t");
+		assertEquals("ge", old.kindOrGe());
+	}
+
+	@Test
+	public void salesListIsNewestFirst()
+	{
+		RunRecord r = run("farm", "2026-01-01T00:00:00Z",
+			"Vorkath", mob(1, 10_000, 0, new long[]{536, 10, 10_000}));
+		List<SessionHistory.RealisedEntry> realised = Arrays.asList(
+			re("ge", 536, 5, 5_000, 100, 5_000, "2026-02-01T00:00:00Z"),
+			re("alch", 536, 2, 4_000, 0, 2_000, "2026-02-03T00:00:00Z"));
+
+		SessionHistory.Snapshot s = SessionHistory.aggregate(
+			Collections.singletonList(r), realised, Collections.emptyList());
+		assertEquals(2, s.getSales().size());
+		assertEquals("2026-02-03T00:00:00Z", s.getSales().get(0).getAt());
+		assertEquals("alch", s.getSales().get(0).getKind());
 	}
 }
