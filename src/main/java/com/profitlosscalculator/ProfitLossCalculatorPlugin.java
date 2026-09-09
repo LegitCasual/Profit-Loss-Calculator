@@ -36,6 +36,7 @@ import net.runelite.api.EnumID;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
@@ -54,6 +55,7 @@ import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.GraphicChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
@@ -92,7 +94,7 @@ import net.runelite.client.util.Text;
 @PluginDescriptor(
 	name = "Profit Loss Calculator",
 	description = "Profit / loss for a play session - loot and pickups in, supplies / spells / teleports / ammo / deaths out - with a boss kill tally and a JSON log",
-	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income", "slayer", "targeted", "skilling"}
+	tags = {"cost", "gp", "profit", "loss", "session", "boss", "supplies", "death", "loot", "income", "slayer", "targeted", "skilling", "realised", "ge"}
 )
 @PluginDependency(SlayerPlugin.class)
 public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalculatorPanel.Controls
@@ -233,10 +235,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private int lastCastTick = -1;
 	private int lastCastComponent = -1;
 
-	// consumable de-dup: one physical click can register twice in a tick, but you can't
-	// use the same item twice in a tick (combo-eating a different item is still allowed)
-	private int lastConsumeTick = -1;
-	private int lastConsumeItemId = -1;
+	// consumables are charged on the inventory drop that follows an Eat/Drink click, not on
+	// the click itself - spam-clicking "Drink" fires many MenuOptionClicked but only one dose
+	// actually leaves the inventory. onMenuOptionClicked just arms this; onGameTick confirms
+	// the charge against that tick's real inventory loss.
+	private int consumeArmedTick = -1000;
+	/** How many ticks after an Eat/Drink click a matching inventory drop still counts as that
+	 *  click's consumption (the action is processed a tick or two after the click). */
+	private static final int CONSUME_CONFIRM_TICKS = 2;
 
 	// ammo + teleport tracking
 	private final AmmoTracker ammoTracker = new AmmoTracker();
@@ -274,6 +280,33 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  skilling action so the inventory diff can be booked as that skill's materials / product.
 	 *  Plain session only. */
 	private final SkillingTracker skillingTracker = new SkillingTracker();
+
+	/** Watches GE sell offers so completed sales can be matched back to the loot that produced
+	 *  them (see {@link SessionHistory#applySale}). */
+	private final GeSaleTracker geSaleTracker = new GeSaleTracker();
+	/** seeded once from {@link SessionHistory#geSlots()} on the first offer event. */
+	private boolean geSlotsSeeded;
+	/** tick of the last login / hop - the GE re-sends every slot for a few ticks after. */
+	private int lastGeLoginTick = -100;
+	/** tick the always-on ambient run was last written to history.jsonl. */
+	private int lastAmbientCheckpointTick = -100000;
+	/** how often (ticks, ~2.5 min) the ambient run is checkpointed so its loot is sale-eligible. */
+	private static final int AMBIENT_CHECKPOINT_TICKS = 250;
+	/** A login was seen; start the ambient run from {@link #onGameTick} once the inventory /
+	 *  equipment containers have actually loaded, so their initial contents aren't mistaken for
+	 *  picked-up loot. */
+	private boolean ambientStartPending;
+
+	/** Inventory as it stood at the last container change seen while a bank / deposit box was
+	 *  open - the base {@link BankTracker} diffs the next change against. {@code null} = a
+	 *  banking interface is not open (or just opened - re-prime before diffing). */
+	private Map<Integer, Integer> prevBankInv;
+	/** {itemId, signedQty} bank moves seen during a live run - replayed into
+	 *  {@link SessionHistory#applyBankMove} once the run is recorded at Stop. */
+	private final List<long[]> pendingBankMoves = new ArrayList<>();
+	/** {itemId, haCoins} High Alchs of looted items during a live run - replayed at Stop. */
+	private final List<long[]> pendingAlch = new ArrayList<>();
+	private final List<String> pendingAlchMob = new ArrayList<>();
 
 	// income tracking
 	/** decides how much of each drop actually reached the bag ("collected") vs stayed on
@@ -396,6 +429,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 		history.start();
 		history.load(this::pushHistory);
+		// plugin enabled while already in-game - onGameTick starts the ambient run once the
+		// item containers are confirmed loaded (see ambientStartPending)
+		ambientStartPending = true;
 		refreshView();
 	}
 
@@ -413,9 +449,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		history.stop();
 		panel = null;
 		session = null;
+		ambientStartPending = false;
 		pendings.clear();
 		bankTiles.clear();
 		bankObjectIdCache.clear();
+		// re-seed the GE tracker from the freshly-loaded slot state if the plugin is re-enabled
+		geSlotsSeeded = false;
 	}
 
 	/** Lifetime history snapshot from the history executor - handed to the History tab.
@@ -436,6 +475,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				{
 					names.computeIfAbsent((int) it[0], this::itemName);
 				}
+			}
+			for (SessionHistory.SaleRow s : lifetime.getSales())
+			{
+				names.computeIfAbsent(s.getItemId(), this::itemName);
+			}
+			for (SessionHistory.ItemStat it : lifetime.getItems())
+			{
+				names.computeIfAbsent(it.getItemId(), this::itemName);
 			}
 			final ProfitLossCalculatorPanel p = panel;
 			if (p != null)
@@ -466,7 +513,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	// ------------------------------------------------------------------ panel controls
 
-	/** The Session-tab flip button: start a plain session when idle, else pause / resume. */
+	/** The Session-tab flip button: pause / resume the run, or start one when idle (only
+	 *  possible with ambient tracking off). */
 	@Override
 	public void onStartPauseResume()
 	{
@@ -474,7 +522,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			if (session == null || sessionFinished)
 			{
-				startRun(Session.RunMode.SESSION, Collections.emptyList());
+				startRun(Session.RunMode.SESSION, Collections.emptyList(), false);
 			}
 			else
 			{
@@ -506,9 +554,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		clientThread.invoke(() ->
 		{
-			if (session == null || sessionFinished)
+			if (canStartForeground())
 			{
-				startRun(Session.RunMode.TARGETED, targets);
+				startForeground(Session.RunMode.TARGETED, targets);
 			}
 		});
 	}
@@ -540,11 +588,28 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	{
 		clientThread.invoke(() ->
 		{
-			if ((session == null || sessionFinished) && slayerTracker.hasTask())
+			if (canStartForeground() && slayerTracker.hasTask())
 			{
-				startRun(Session.RunMode.SLAYER, Collections.emptyList());
+				startForeground(Session.RunMode.SLAYER, Collections.emptyList());
 			}
 		});
+	}
+
+	/** True when an explicit foreground run can begin now - no explicit run is already live
+	 *  (the always-on ambient run doesn't block one). */
+	private boolean canStartForeground()
+	{
+		return session == null || sessionFinished || session.isAmbient();
+	}
+
+	/** Stop the ambient run (checkpointing its loot) and begin an explicit foreground run. */
+	private void startForeground(Session.RunMode mode, List<String> targets)
+	{
+		if (session != null && !sessionFinished)
+		{
+			stopSession();
+		}
+		startRun(mode, targets, false);
 	}
 
 	@Override
@@ -552,9 +617,17 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	{
 		clientThread.invoke(() ->
 		{
-			if (session != null && !sessionFinished)
+			if (session == null || sessionFinished)
 			{
-				stopSession();
+				return;
+			}
+			// Stopping an explicit run hands back to ambient; "stopping" the ambient run itself
+			// just splits it - checkpoint the stretch so far into History and open a fresh one.
+			final boolean wasAmbient = session.isAmbient();
+			stopSession();
+			if (wasAmbient || config.ambientTracking())
+			{
+				startAmbient();
 			}
 		});
 	}
@@ -564,14 +637,22 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	{
 		clientThread.invoke(() ->
 		{
-			final Session.RunMode mode = session != null ? session.getMode() : Session.RunMode.SESSION;
-			final List<String> targets = session != null
-				? new ArrayList<>(session.getTargetMobs()) : Collections.emptyList();
-			if (session != null && !sessionFinished)
+			if (session == null || sessionFinished)
 			{
-				stopSession();
+				return;
 			}
-			startRun(mode, targets);
+			final Session.RunMode mode = session.getMode();
+			final boolean ambient = session.isAmbient();
+			final List<String> targets = new ArrayList<>(session.getTargetMobs());
+			stopSession();
+			if (ambient)
+			{
+				startAmbient();
+			}
+			else
+			{
+				startRun(mode, targets, false);
+			}
 		});
 	}
 
@@ -613,13 +694,22 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	// ------------------------------------------------------------------ session lifecycle
 
+	/** Begin the always-on background run. */
+	private void startAmbient()
+	{
+		startRun(Session.RunMode.SESSION, Collections.emptyList(), true);
+		lastAmbientCheckpointTick = client.getTickCount();
+	}
+
 	/** Begin a run. {@code mode} picks plain session / Targeted farm / Slayer task;
 	 *  {@code targetMobs} is only meaningful for {@link Session.RunMode#TARGETED} - the farm's
-	 *  initial target group (more can be added later via {@link #onAddTargetMob}). */
-	private void startRun(Session.RunMode mode, List<String> targetMobs)
+	 *  initial target group (more can be added later via {@link #onAddTargetMob});
+	 *  {@code ambient} marks the auto-started background run. */
+	private void startRun(Session.RunMode mode, List<String> targetMobs, boolean ambient)
 	{
 		final Instant now = Instant.now();
 
+		ambientStartPending = false;
 		lastKnownInv = ContainerSnapshot.of(client.getItemContainer(InventoryID.INV));
 		lastKnownWorn = ContainerSnapshot.of(client.getItemContainer(InventoryID.WORN));
 		pendings.clear();
@@ -655,6 +745,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		dropIntent.clear();
 		droppedOut.clear();
 		alchCredited.clear();
+		pendingBankMoves.clear();
+		pendingAlch.clear();
+		pendingAlchMob.clear();
+		prevBankInv = null;
 		frozenView = null;
 
 		if (config.writeSessionFile())
@@ -678,6 +772,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 		session = new Session(now);
 		session.setMode(mode);
+		session.setAmbient(ambient);
 		targets.forEach(session::addTargetMob);
 		sessionFinished = false;
 		refreshView();
@@ -704,6 +799,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		logger.line(paused ? "session_pause" : "session_resume").submit();
 		refreshView();
+	}
+
+	/** A {@link RunRecord} for the live (not finalised) session - the shape {@link #stopSession}
+	 *  writes, reused to checkpoint the ambient run mid-flight. */
+	private RunRecord currentRunRecord()
+	{
+		final Session.RunMode mode = session.getMode();
+		final String kind = mode == Session.RunMode.TARGETED ? "farm"
+			: mode == Session.RunMode.SLAYER ? "slayer" : "session";
+		final long dur = java.time.Duration.between(session.getStartTime(), Instant.now()).getSeconds();
+		return new RunRecord(SessionHistory.SCHEMA, kind, session.getStartTime().toString(),
+			Instant.now().toString(), dur, config.incomeValuation().name(), perMobRollup());
+	}
+
+	/** Write the ambient run to history.jsonl (upsert by start) so its loot can be matched
+	 *  against GE sales / bank deposits before the run ends on logout. */
+	private void checkpointAmbient()
+	{
+		if (session == null || sessionFinished || !session.isAmbient())
+		{
+			return;
+		}
+		lastAmbientCheckpointTick = client.getTickCount();
+		history.checkpoint(currentRunRecord(), this::pushHistory);
 	}
 
 	private void stopSession()
@@ -766,16 +885,42 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final Path file = logger.path();
 		logger.close();
 
-		// every run - session, farm or slayer task - feeds the per-mob lifetime history
+		// every run - session, farm or slayer task - feeds the per-mob lifetime history. An
+		// ambient run that never touched anything is dropped (idle logins shouldn't litter
+		// history.jsonl); an explicit Start/Stop is always recorded even if empty. checkpoint()
+		// upserts by start, so a stop after periodic ambient checkpoints replaces that line
+		// instead of appending a duplicate.
 		final String kind = targeted ? "farm" : mode == Session.RunMode.SLAYER ? "slayer" : "session";
-		history.record(new RunRecord(
-			SessionHistory.SCHEMA,
-			kind,
-			session.getStartTime().toString(),
-			session.getEndTime().toString(),
-			durationSec,
-			config.incomeValuation().name(),
-			perMob), this::pushHistory);
+		final String runStart = session.getStartTime().toString();
+		final boolean recordRun = !perMob.isEmpty() || !session.isAmbient()
+			|| !pendingBankMoves.isEmpty() || !pendingAlch.isEmpty();
+		if (recordRun)
+		{
+			history.checkpoint(new RunRecord(
+				SessionHistory.SCHEMA,
+				kind,
+				runStart,
+				session.getEndTime().toString(),
+				durationSec,
+				config.incomeValuation().name(),
+				perMob), this::pushHistory);
+
+			// the run is now in history.jsonl - replay anything banked / alched during it so the
+			// FIFO attribution can land it on this run (preferRunStart)
+			for (long[] mv : pendingBankMoves)
+			{
+				history.applyBankMove((int) mv[0], mv[1], runStart, this::pushHistory);
+			}
+			for (int i = 0; i < pendingAlch.size(); i++)
+			{
+				final long[] a = pendingAlch.get(i);
+				final String alchMob = i < pendingAlchMob.size() ? pendingAlchMob.get(i) : null;
+				history.applyAlch((int) a[0], a[1], alchMob, runStart, Instant.now().toString(), this::pushHistory);
+			}
+		}
+		pendingBankMoves.clear();
+		pendingAlch.clear();
+		pendingAlchMob.clear();
 
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
@@ -888,6 +1033,65 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			// totals, which would otherwise register as one huge "action" per skill
 			skillingTracker.reset(Collections.emptyMap());
 		}
+		if (state == GameState.LOGGING_IN || state == GameState.HOPPING || state == GameState.CONNECTION_LOST)
+		{
+			// the GE re-sends every slot for a few ticks after login - GeSaleTracker ignores
+			// EMPTY during this window so it doesn't wipe the restored baseline
+			lastGeLoginTick = client.getTickCount();
+		}
+		if (state == GameState.LOGIN_SCREEN && session != null && !sessionFinished && session.isAmbient())
+		{
+			// end this play-session's ambient run so History gets one tidy row per session
+			stopSession();
+		}
+		if (state == GameState.LOGGED_IN)
+		{
+			// don't start the ambient run here - the inventory / equipment containers usually
+			// haven't arrived yet, and their first load would read as a pile of picked-up loot.
+			// onGameTick starts it once the containers are actually populated.
+			ambientStartPending = true;
+		}
+	}
+
+	/** GE tax re-sends every slot for a couple of ticks after login. */
+	private static final int GE_LOGIN_BURST_TICKS = 2;
+
+	/**
+	 * A GE offer slot changed. When it is a sell fill, hand the delta to
+	 * {@link SessionHistory#applySale} which matches it back (FIFO, oldest run first) to the
+	 * loot that produced it. Buys are ignored - supplies are costed by consumption. The
+	 * per-slot baseline is persisted after every event so a sale that finishes while logged
+	 * out is attributed once, not twice.
+	 */
+	@Subscribe
+	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
+	{
+		if (!config.trackRealisedGp())
+		{
+			return;
+		}
+		if (!geSlotsSeeded)
+		{
+			geSaleTracker.restore(history.geSlots());
+			geSlotsSeeded = true;
+		}
+		final GrandExchangeOffer offer = event.getOffer();
+		if (offer == null)
+		{
+			return;
+		}
+		final boolean loginBurst = client.getTickCount() <= lastGeLoginTick + GE_LOGIN_BURST_TICKS;
+		final GeSaleTracker.TaxFn taxFn = config.deductGeTax() ? GeTax::tax : null;
+		final java.util.List<GeSaleTracker.Sale> sales = geSaleTracker.onOffer(
+			event.getSlot(), offer.getItemId(), offer.getState(),
+			offer.getQuantitySold(), offer.getSpent(), loginBurst, taxFn);
+		history.saveGeSlots(geSaleTracker.snapshot());
+		for (GeSaleTracker.Sale sale : sales)
+		{
+			log.debug("GE sale: {} x{} for {} (tax {})",
+				sale.getItemId(), sale.getQty(), sale.getGross(), sale.getTax());
+			history.applySale(sale, this::pushHistory);
+		}
 	}
 
 	@Subscribe
@@ -904,23 +1108,59 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		if (!ProfitLossCalculatorConfig.GROUP.equals(event.getGroup())
-			|| !"showNoSessionWarning".equals(event.getKey()))
+		if (!ProfitLossCalculatorConfig.GROUP.equals(event.getGroup()))
 		{
 			return;
 		}
-		// Add / remove the overlay outright rather than leaving it registered and letting
-		// render() no-op, so turning the setting off clears it from the screen immediately.
-		if (config.showNoSessionWarning())
+
+		if ("showNoSessionWarning".equals(event.getKey()))
 		{
-			overlayManager.add(noSessionOverlay);
-			bankScanQueued = true;
+			// Add / remove the overlay outright rather than leaving it registered and letting
+			// render() no-op, so turning the setting off clears it from the screen immediately.
+			if (config.showNoSessionWarning())
+			{
+				overlayManager.add(noSessionOverlay);
+				bankScanQueued = true;
+			}
+			else
+			{
+				overlayManager.remove(noSessionOverlay);
+				bankTiles.clear();
+				bankScanQueued = false;
+			}
+			return;
 		}
-		else
+
+		if ("ambientTracking".equals(event.getKey()))
 		{
-			overlayManager.remove(noSessionOverlay);
-			bankTiles.clear();
-			bankScanQueued = false;
+			clientThread.invoke(() ->
+			{
+				if (config.ambientTracking())
+				{
+					// let onGameTick pick it up once logged in with containers loaded, unless a
+					// foreground run is already going
+					ambientStartPending = true;
+				}
+				else
+				{
+					// turning it off stops the background run right away - don't leave it "locked
+					// on". A foreground Session / Farm / Slayer run keeps going.
+					ambientStartPending = false;
+					if (session != null && !sessionFinished && session.isAmbient())
+					{
+						// a run that actually recorded something is stopped properly (checkpointed
+						// to History, chat summary); an untouched one is just dropped silently
+						if (collectedTotal() > 0 || session.total() > 0 || !session.getDeaths().isEmpty())
+						{
+							stopSession();
+						}
+						session = null;
+						sessionFinished = false;
+						frozenView = null;
+						refreshView();
+					}
+				}
+			});
 		}
 	}
 
@@ -948,6 +1188,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		if (id == InventoryID.INV)
 		{
 			lastKnownInv = ContainerSnapshot.of(event.getItemContainer());
+			trackBankMoves();
 		}
 		else
 		{
@@ -1039,6 +1280,29 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			scanNearbyBanks();
 		}
 
+		// drop the banked-loot diff baseline whenever no bank / deposit box is open, so the
+		// next time one opens the first inventory change re-primes instead of reading as a
+		// giant deposit. Runs even while idle - banking loot without a session still counts.
+		if (prevBankInv != null && !bankInterfaceOpen())
+		{
+			prevBankInv = null;
+		}
+
+		// start the always-on ambient run, but only once the inventory AND equipment containers
+		// have actually loaded - starting it on the LOGGED_IN event would take an empty baseline
+		// and then bank the whole login inventory / worn kit as picked-up loot.
+		if (ambientStartPending
+			&& config.ambientTracking()
+			&& (session == null || sessionFinished)
+			&& client.getGameState() == GameState.LOGGED_IN
+			&& client.getItemContainer(InventoryID.INV) != null
+			&& client.getItemContainer(InventoryID.WORN) != null)
+		{
+			ambientStartPending = false;
+			startAmbient();
+			return; // let the fresh baseline settle one tick before diffing anything
+		}
+
 		// cheap field reads on the bundled Slayer plugin's own service - polled every tick
 		// (even idle) so the Slayer tab's task preview stays live before Start is pressed.
 		final boolean slayerOn = config.trackSlayerTask();
@@ -1062,6 +1326,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		pushStateHistory();
 		trackOpponent();
 
+		if (session.isAmbient()
+			&& client.getTickCount() - lastAmbientCheckpointTick >= AMBIENT_CHECKPOINT_TICKS
+			&& (collectedTotal() > 0 || session.total() > 0))
+		{
+			checkpointAmbient();
+		}
+
 		// true once per tick, after this tick's container/varp changes have all landed - ammo,
 		// teleports and income are all reconciled against this single settled state rather than
 		// eagerly per event, so a multi-step action (e.g. loading a cannonball: inventory count
@@ -1076,15 +1347,20 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// like a teleport. Skip while banking / paused - a deposit would look like spending
 		// the last charge, a withdrawal like a pickup.
 		final Map<Integer, Integer> curItems = trackedItems();
-		if (accrue)
+		// prevTickItems is empty only on the first accruing tick after a (re)start whose baseline
+		// hasn't been captured yet (or a container load still in flight) - diffing against it
+		// would treat everything you are holding as this tick's income. Skip until it is primed.
+		if (accrue && !prevTickItems.isEmpty())
 		{
-			if (!prevTickItems.isEmpty())
-			{
-				detectTeleports(prevTickItems, curItems);
-			}
+			detectTeleports(prevTickItems, curItems);
 			final Map<Integer, Integer> losses = ContainerSnapshot.lost(prevTickItems, curItems);
 			trackDrops(losses);
 			final Map<Integer, Integer> gains = ContainerSnapshot.lost(curItems, prevTickItems);
+			// a food / potion that actually left the inventory after an Eat/Drink click - the
+			// real "you consumed one" signal, as opposed to how many times the button was hit.
+			// Clears the consumed item (and the lower-dose potion it turned into) from both maps
+			// so the loot / skilling logic below can't also claim them.
+			chargeConsumed(losses, gains);
 			if (!gains.isEmpty())
 			{
 				reconcileIncome(gains);
@@ -1238,11 +1514,63 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return;
 		}
 		bankOpen = nowBank;
-		if (!nowBank)
+		if (nowBank)
+		{
+			// about to shuffle loot around - make sure the ambient run's loot is recorded so a
+			// deposit / a sale straight after can be matched to it
+			checkpointAmbient();
+		}
+		else
 		{
 			ammoTracker.reset(ammoOwned());
 			pickupTracker.reset();
 			prevTickItems = trackedItems();
+		}
+	}
+
+	/** True while the bank or a deposit box is open - the window banked-loot tracking runs in. */
+	private boolean bankInterfaceOpen()
+	{
+		return client.getWidget(InterfaceID.Bankmain.ITEMS) != null
+			|| client.getWidget(InterfaceID.BankDepositbox.INVENTORY) != null;
+	}
+
+	/**
+	 * An inventory change while a bank / deposit box is open: diff it against the last one to
+	 * find deposits (loot secured) and withdrawals (loot un-secured), and route them - buffered
+	 * onto the current run, or straight to {@link SessionHistory#applyBankMove} when idle.
+	 * {@link #prevBankInv} is nulled by {@link #onGameTick} whenever no banking interface is
+	 * open, so the next open re-primes from a fresh baseline (opening a bank is not a deposit).
+	 */
+	private void trackBankMoves()
+	{
+		if (!config.trackRealisedGp() || !bankInterfaceOpen())
+		{
+			return;
+		}
+		if (prevBankInv == null)
+		{
+			prevBankInv = lastKnownInv;
+			return;
+		}
+		final List<BankTracker.Move> moves = BankTracker.diff(prevBankInv, lastKnownInv);
+		prevBankInv = lastKnownInv;
+		if (moves.isEmpty())
+		{
+			return;
+		}
+		final boolean live = session != null && !sessionFinished;
+		for (BankTracker.Move m : moves)
+		{
+			final long signed = m.isDeposit() ? m.getQty() : -m.getQty();
+			if (live)
+			{
+				pendingBankMoves.add(new long[]{m.getItemId(), signed});
+			}
+			else
+			{
+				history.applyBankMove(m.getItemId(), signed, null, this::pushHistory);
+			}
 		}
 	}
 
@@ -1961,6 +2289,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		return client.getVarbitValue(VarbitID.IRONMAN) > 0;
 	}
 
+	/**
+	 * An "Eat"/"Drink" click. Doesn't charge anything on its own - a held click fires this many
+	 * times but the game only consumes one dose / bite per 3 ticks. It just arms
+	 * {@link #chargeConsumed}, which books the cost when (and only when) the food / potion
+	 * actually leaves the inventory.
+	 */
 	private void handleConsumable(MenuOptionClicked event)
 	{
 		int itemId = event.getItemId();
@@ -1972,29 +2306,66 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				itemId = widget.getItemId();
 			}
 		}
-		final int tick = client.getTickCount();
-		if (tick == lastConsumeTick && itemId == lastConsumeItemId)
+		// only arm for something the pricer actually recognises as a consumable, so a stray
+		// "Eat"/"Drink"-labelled action on some other item can't charge an unrelated drop
+		if (consumableCostService.price(itemId, false) == null)
 		{
 			return;
 		}
+		consumeArmedTick = client.getTickCount();
+	}
 
-		final ConsumableCostService.Consumed c = consumableCostService.price(itemId, config.potionDoseAware());
-		if (c == null)
+	/**
+	 * Book the real cost of a consumable that just left the inventory, if an "Eat"/"Drink" click
+	 * armed it within the last {@link #CONSUME_CONFIRM_TICKS} ticks. Charges once per unit that
+	 * actually went (a potion sip is one unit: the "(4)" id drops and the "(3)" id appears, so
+	 * the clicked id shows up in {@code losses} exactly once). Removes the consumed item from
+	 * {@code losses}, and the lower-dose potion it became from {@code gains}, so the drop /
+	 * skilling / income logic downstream can't also claim either side.
+	 */
+	private void chargeConsumed(Map<Integer, Integer> losses, Map<Integer, Integer> gains)
+	{
+		if (losses.isEmpty() || client.getTickCount() - consumeArmedTick > CONSUME_CONFIRM_TICKS)
 		{
 			return;
 		}
-		lastConsumeTick = tick;
-		lastConsumeItemId = itemId;
-		session.add(new CostEvent(CostEvent.Type.CONSUMABLE, Instant.now(),
-			c.getItemId(), 1, c.getGp(), c.getName(), null));
-		session.addMobCost(costMob(), c.getGp());
-		logger.line("consumable")
-			.put("itemId", c.getItemId())
-			.put("item", c.getName())
-			.put("qty", 1)
-			.put("gp", c.getGp())
-			.submit();
-		refreshView();
+		boolean any = false;
+		final java.util.Iterator<Map.Entry<Integer, Integer>> it = losses.entrySet().iterator();
+		while (it.hasNext())
+		{
+			final Map.Entry<Integer, Integer> e = it.next();
+			final int lostId = e.getKey();
+			final ConsumableCostService.Consumed c =
+				consumableCostService.price(lostId, config.potionDoseAware());
+			if (c == null)
+			{
+				continue;
+			}
+			final int qty = Math.max(1, e.getValue());
+			for (int i = 0; i < qty; i++)
+			{
+				session.add(new CostEvent(CostEvent.Type.CONSUMABLE, Instant.now(),
+					c.getItemId(), 1, c.getGp(), c.getName(), null));
+				session.addMobCost(costMob(), c.getGp());
+			}
+			logger.line("consumable")
+				.put("itemId", c.getItemId())
+				.put("item", c.getName())
+				.put("qty", qty)
+				.put("gp", c.getGp() * (long) qty)
+				.submit();
+			it.remove();
+			// the sip turned a "(4)" into a "(3)" - that lower dose is the same potion, not income
+			final int family = ItemVariationMapping.map(lostId);
+			gains.keySet().removeIf(g -> ItemVariationMapping.map(g) == family);
+			any = true;
+		}
+		if (any)
+		{
+			// this consume cycle is paid for - a held click re-arms on its next MenuOptionClicked
+			consumeArmedTick = -1000;
+			refreshView();
+		}
 	}
 
 	// ------------------------------------------------------------------ ammo
@@ -2345,8 +2716,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		refreshView();
 	}
 
-	/** Book the coins a High Alchemy cast produces as income, attributed like a cost (to the
-	 *  mob being fought, or a "High alch" bucket). */
+	/**
+	 * A High Alchemy cast on a looted item. Under the potential / realised model this is a
+	 * <b>realisation</b> event, not fresh income: the item is dropped from the run's potential
+	 * ("gained") rollup and its HA coin value is recorded as realised at Stop (see
+	 * {@link SessionHistory#applyAlch}). {@link #alchCredited} still keeps the coins out of
+	 * the inventory-gain path.
+	 */
 	private void recordAlchIncome(int itemId)
 	{
 		final long coins = haValue(itemId);
@@ -2354,22 +2730,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			return;
 		}
-		final String mob = costMob();
-		final String source = mob != null ? mob : "High alch";
-		final IncomeEvent ie = new IncomeEvent(IncomeEvent.Type.ALCH, Instant.now(), source,
-			Collections.singletonMap(ItemID.COINS, (int) coins));
-		session.add(ie);
-		// a grouped run's own alch profit should show in the live per-kill view, not just history
-		if (session.isGrouped() && session.matchesTarget(source, slayerTracker) && session.lastKill() != null)
-		{
-			session.lastKill().add(ie);
-		}
+		session.addAlchedItem(itemId, 1);
+		pendingAlch.add(new long[]{itemId, coins});
+		pendingAlchMob.add(costMob());
 		alchCredited.merge(ItemID.COINS, (int) coins, Integer::sum);
-		logger.line("loot")
-			.put("kind", "ALCH")
-			.put("source", source)
+		logger.line("alch")
+			.put("mob", costMob())
 			.put("item", itemName(itemId))
-			.put("droppedGp", coins)
+			.put("haGp", coins)
 			.submit();
 		refreshView();
 	}
@@ -2626,6 +2994,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final long farmCollected = grouped ? killAttributedValue(this::countedItems) : collectedAll;
 		final long farmDropped = grouped ? killAttributedValue(IncomeEvent::getItems) : potentialTotal();
 		final long net = farmCollected - cost;
+		// actual net: swap the GE-snapshot value of loot you've since alched for the coins it
+		// actually made. (collectedTotal still values alched loot at GE - that's the "potential"
+		// figure - so subtract it back out here and add the realised proceeds instead.)
+		final long actualNet = net + realisedSoFar() - alchedLootedGeValue();
+		// the figure the rate / per-kill lines describe: the actual net once anything's been
+		// cashed out this run, otherwise the potential net
+		final long headlineNet = (realisedSoFar() > 0 || bankedSoFar() > 0) ? actualNet : net;
 		final long kills = session.getBossKills();
 		final long secs = java.time.Duration.between(session.getStartTime(),
 			session.getEndTime() != null ? session.getEndTime() : Instant.now()).getSeconds();
@@ -2655,12 +3030,92 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			.gains(farmCollected)
 			.losses(cost)
 			.net(net)
-			.netPerHour(secs > 60 ? net * 3600 / secs : 0)
-			.gpPerKill(grouped && kills > 0 ? net / kills : 0)
+			// once something's been cashed out, the rate / per-kill figure follows the actual net
+			.netPerHour(secs > 60 ? headlineNet * 3600 / secs : 0)
+			.gpPerKill(grouped && kills > 0 ? headlineNet / kills : 0)
 			.secPerKill(grouped && kills > 0 && secs > 0 ? secs / kills : 0)
 			.potential(farmDropped)
 			.atRisk(session.atRiskTotal())
+			.realisedSoFar(realisedSoFar())
+			.bankedSoFar(bankedSoFar())
+			.actualNet(actualNet)
 			.build();
+	}
+
+	/** GE-snapshot value of loot that was looted this run and has since been High Alched - the
+	 *  slice of {@link #collectedTotal()} that {@link #realisedSoFar()} has replaced with real
+	 *  coins. Only the alched quantity that actually came from loot counts (alching an item you
+	 *  brought yourself isn't in collectedTotal, so there's nothing to subtract). */
+	private long alchedLootedGeValue()
+	{
+		if (session == null || session.getAlchedItems().isEmpty())
+		{
+			return 0L;
+		}
+		long v = 0L;
+		for (Map.Entry<Integer, Integer> a : session.getAlchedItems().entrySet())
+		{
+			final int id = a.getKey();
+			int collected = 0;
+			for (IncomeEvent e : session.getIncome())
+			{
+				collected += e.getCollected().getOrDefault(id, 0);
+			}
+			final int fromLoot = Math.min(a.getValue(), collected);
+			if (fromLoot > 0)
+			{
+				v += lootValue(id, fromLoot);
+			}
+		}
+		return v;
+	}
+
+	/** HA coin value alched during this run so far - a live hint; the real realised total is
+	 *  History-tab only (see {@link SessionHistory#applyAlch}). */
+	private long realisedSoFar()
+	{
+		long gp = 0;
+		for (long[] a : pendingAlch)
+		{
+			gp += a[1];
+		}
+		return gp;
+	}
+
+	/**
+	 * Net GE-priced value of this run's <b>loot</b> moved to a bank / deposit box so far - a
+	 * live hint. Capped per item at what has actually been collected this run (the same cap
+	 * {@link SessionHistory#applyBankMove} applies), so shuffling unrelated supplies or gear at
+	 * a bank mid-run never registers - only loot you've secured does.
+	 */
+	private long bankedSoFar()
+	{
+		if (session == null || pendingBankMoves.isEmpty())
+		{
+			return 0L;
+		}
+		// net signed qty moved per item id (deposits +, withdrawals −)
+		final Map<Integer, Long> movedByItem = new HashMap<>();
+		for (long[] mv : pendingBankMoves)
+		{
+			movedByItem.merge((int) mv[0], mv[1], Long::sum);
+		}
+		long gp = 0L;
+		for (Map.Entry<Integer, Long> e : movedByItem.entrySet())
+		{
+			final int id = e.getKey();
+			long collected = 0L;
+			for (IncomeEvent ie : session.getIncome())
+			{
+				collected += ie.getCollected().getOrDefault(id, 0);
+			}
+			final long banked = Math.min(Math.max(0L, e.getValue()), collected);
+			if (banked > 0)
+			{
+				gp += banked * Math.max(0, itemManager.getItemPrice(id));
+			}
+		}
+		return gp;
 	}
 
 	/** The set of income events attributed to a kill bucket (identity-based). */
@@ -2743,6 +3198,23 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			(full ? e.getItems() : e.getCollected()).forEach((id, q) -> got.get(mob).merge(id, q, Integer::sum));
 			drop.computeIfAbsent(mob, k -> new LinkedHashMap<>());
 			e.getItems().forEach((id, q) -> drop.get(mob).merge(id, q, Integer::sum));
+		}
+
+		// a High Alched looted item is realised, not potential - drop it from "gained"
+		final Map<Integer, Integer> alched = new HashMap<>(session.getAlchedItems());
+		for (Map<Integer, Integer> mobItems : got.values())
+		{
+			for (Map.Entry<Integer, Integer> ae : alched.entrySet())
+			{
+				final Integer have = mobItems.get(ae.getKey());
+				if (ae.getValue() <= 0 || have == null || have <= 0)
+				{
+					continue;
+				}
+				final int take = Math.min(have, ae.getValue());
+				mobItems.put(ae.getKey(), have - take);
+				ae.setValue(ae.getValue() - take);
+			}
 		}
 		session.getKillsByMob().forEach((mob, n) ->
 		{

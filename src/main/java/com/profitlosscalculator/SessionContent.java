@@ -165,12 +165,11 @@ class SessionContent extends JPanel
 
 		if (sessionShowing)
 		{
-			statGrid.add(PanelUi.statCell("Net", PanelUi.sign(view.getNet()),
-				view.getNet() >= 0 ? PanelUi.GAIN_COLOR : PanelUi.LOSS_COLOR, true));
-			statGrid.add(PanelUi.statCell("", view.getNetPerHour() != 0
+			PanelUi.addNetCells(statGrid, view, PanelUi.statCell("", view.getNetPerHour() != 0
 				? PanelUi.gpPlain(view.getNetPerHour()) + "/hr" : "", ColorScheme.LIGHT_GRAY_COLOR, false));
-			statGrid.add(PanelUi.statCell("Gains", "+" + PanelUi.gpPlain(view.getGains()), PanelUi.GAIN_COLOR, false));
+			statGrid.add(PanelUi.statCell("Potential", "+" + PanelUi.gpPlain(view.getGains()), PanelUi.GAIN_COLOR, false));
 			statGrid.add(PanelUi.statCell("Losses", "-" + PanelUi.gpPlain(view.getLosses()), PanelUi.LOSS_COLOR, false));
+			PanelUi.addRealisedSoFar(statGrid, view);
 			if (view.getAtRisk() > 0)
 			{
 				statGrid.add(PanelUi.statCell("At risk", PanelUi.gpPlain(view.getAtRisk()), PanelUi.DEATH_COLOR, false));

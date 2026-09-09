@@ -36,6 +36,24 @@ public interface ProfitLossCalculatorConfig extends Config
 	)
 	String incomeSection = "income";
 
+	@ConfigSection(
+		name = "Realised GP",
+		description = "Match completed Grand Exchange sales back to the loot that produced them",
+		position = 3
+	)
+	String realisedSection = "realised";
+
+	@ConfigItem(
+		keyName = "ambientTracking",
+		name = "Always-on tracking",
+		description = "Opt-in. When on, a background run tracks loot / ground pickups / cost / skilling the whole time you're logged in, no Start needed - it starts once your inventory has loaded so your worn kit isn't counted as loot. Pressing Start on a Target Farm / Slayer run takes the foreground; the background run resumes after. Off (default) = only track inside an explicit Start–Stop run.",
+		position = 0
+	)
+	default boolean ambientTracking()
+	{
+		return false;
+	}
+
 	@ConfigItem(
 		keyName = "showOverlay",
 		name = "In-game overlay",
@@ -233,6 +251,30 @@ public interface ProfitLossCalculatorConfig extends Config
 	default int ignoreIncomeBelow()
 	{
 		return 0;
+	}
+
+	@ConfigItem(
+		keyName = "trackRealisedGp",
+		name = "Track realised & banked",
+		description = "Follow a stopped run's loot the rest of the way: match GE sales (net of tax) and High Alchs back to it as 'realised', and track what's been secured in a bank / deposit box as 'banked'. Shown in the History tab (potential stays the live headline). FIFO by item, oldest run first; only loot from stopped runs is eligible. Writes realised.jsonl / banked.jsonl / ge-slots.json under .runelite/profit-loss-calculator/.",
+		section = realisedSection,
+		position = 0
+	)
+	default boolean trackRealisedGp()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "deductGeTax",
+		name = "Deduct GE tax",
+		description = "Subtract the 2% Grand Exchange sales tax (capped 5M/item, none under 50 gp) from realised proceeds. Off = track the gross sale amount.",
+		section = realisedSection,
+		position = 1
+	)
+	default boolean deductGeTax()
+	{
+		return true;
 	}
 
 	// Internal state, not a user setting - set once the first-run notice has been shown.

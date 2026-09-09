@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -49,6 +50,8 @@ import net.runelite.client.RuneLite;
 class SessionHistory
 {
 	static final int SCHEMA = 3;
+	/** {@code realised.jsonl} / {@code banked.jsonl} line schema. */
+	static final int REALISED_SCHEMA = 1;
 	/** Key used for cost that could not be tied to a mob. */
 	static final String UNATTRIBUTED = "";
 	private static final String DIR_NAME = "profit-loss-calculator";
@@ -56,12 +59,27 @@ class SessionHistory
 	private static final String LEGACY_DIR_NAME = "session-cost-tracker";
 	private static final String FILE_NAME = "history.jsonl";
 	private static final String BACKUP_NAME = "history-v1-backup.jsonl";
+	/** One line per GE sale / High Alch chunk attributed back to a run's loot. */
+	private static final String REALISED_NAME = "realised.jsonl";
+	/** One line per bank / deposit-box move of a run's loot (signed qty). */
+	private static final String BANKED_NAME = "banked.jsonl";
+	/** Last-seen GE offer state per slot, so an offline-completed sale isn't double-counted. */
+	private static final String GE_SLOTS_NAME = "ge-slots.json";
+
+	private static final int COINS = net.runelite.api.gameval.ItemID.COINS;
+	private static final int PLATINUM = net.runelite.api.gameval.ItemID.PLATINUM;
 
 	private final Gson gson;
 	private ExecutorService executor;
 
 	/** Touched only on the executor thread. */
 	private final List<RunRecord> entries = new ArrayList<>();
+	/** GE sales + High Alchs attributed to runs. Touched only on the executor thread. */
+	private final List<RealisedEntry> realised = new ArrayList<>();
+	/** Bank / deposit-box moves of run loot (signed qty). Touched only on the executor thread. */
+	private final List<BankEntry> banked = new ArrayList<>();
+	/** Last-loaded GE slot state, for the plugin to seed its tracker once. */
+	private volatile Map<Integer, GeSaleTracker.SlotState> geSlots = new HashMap<>();
 	private volatile Snapshot snapshot = Snapshot.EMPTY;
 
 	@Inject
@@ -107,6 +125,11 @@ class SessionHistory
 				entries.clear();
 				readHistoryFile();
 				migrateLegacy();
+				realised.clear();
+				readRealisedFile();
+				banked.clear();
+				readBankedFile();
+				geSlots = readGeSlots();
 			}
 			catch (Exception e)
 			{
@@ -179,6 +202,8 @@ class SessionHistory
 				}
 				return rr.getPerMob() == null || rr.getPerMob().isEmpty();
 			});
+			// realised / banked are attributed globally by item now, not per mob - deleting a
+			// mob just shrinks the loot ledger, which auto-caps realised for those items
 			try
 			{
 				rewrite();
@@ -191,23 +216,296 @@ class SessionHistory
 		});
 	}
 
-	void record(RunRecord entry, Consumer<Snapshot> cb)
+	/**
+	 * Upsert a run by its {@code start} - replace the matching {@code history.jsonl} line, else
+	 * append. Every run lands here: an explicit Start/Stop has a unique start so it just appends,
+	 * and the always-on ambient run is checkpointed periodically (to make its loot sale-eligible
+	 * before it Stops) then replaced in place on Stop rather than duplicated. A full rewrite; the
+	 * file is small.
+	 */
+	void checkpoint(RunRecord entry, Consumer<Snapshot> cb)
+	{
+		run(() ->
+		{
+			int idx = -1;
+			for (int i = 0; i < entries.size(); i++)
+			{
+				if (java.util.Objects.equals(entries.get(i).getStart(), entry.getStart()))
+				{
+					idx = i;
+					break;
+				}
+			}
+			if (idx >= 0)
+			{
+				entries.set(idx, entry);
+			}
+			else
+			{
+				entries.add(entry);
+			}
+			try
+			{
+				Files.createDirectories(dir());
+				rewrite();
+			}
+			catch (IOException e)
+			{
+				log.warn("could not checkpoint run", e);
+			}
+			publish(cb);
+		});
+	}
+
+	// ------------------------------------------------------------------ realised GP
+
+	/** The GE slot state as it stood at the last {@link #load()} - the plugin seeds its
+	 *  {@link GeSaleTracker} from this once, so an offline-completed sale isn't double-counted. */
+	Map<Integer, GeSaleTracker.SlotState> geSlots()
+	{
+		return geSlots;
+	}
+
+	/** Persist the current GE slot state (called from the client thread with a fresh copy). */
+	void saveGeSlots(Map<Integer, GeSaleTracker.SlotState> slots)
 	{
 		run(() ->
 		{
 			try
 			{
 				Files.createDirectories(dir());
-				Files.write(file(), (gson.toJson(entry) + "\n").getBytes(StandardCharsets.UTF_8),
+				Files.write(geSlotsFile(), gson.toJson(slots).getBytes(StandardCharsets.UTF_8),
+					StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+			}
+			catch (IOException e)
+			{
+				log.warn("could not write GE slot state", e);
+			}
+		});
+	}
+
+	/**
+	 * A completed GE sell fill. Attribution is <b>global by item</b>: the loot ledger knows
+	 * you have ever looted {@code L} of this item (summed across every run, any mob); a sale
+	 * counts toward realised only up to {@code L − alreadyRealised}. Selling more than that
+	 * (bank stock) is dropped and the fill's proceeds pro-rated to the counted quantity.
+	 */
+	void applySale(GeSaleTracker.Sale sale, Consumer<Snapshot> cb)
+	{
+		run(() ->
+		{
+			if (sale == null || sale.getQty() <= 0)
+			{
+				return;
+			}
+			appendRealised(matchRealised("ge", sale.getItemId(), sale.getQty(),
+				sale.getGross(), sale.getTax(), Instant.now().toString()), cb);
+		});
+	}
+
+	/** A High Alchemy of a looted item - a realisation at the HA coin value, one unit, no tax. */
+	void applyAlch(int itemId, long haCoins, String mob, String preferRunStart, String at, Consumer<Snapshot> cb)
+	{
+		run(() -> appendRealised(matchRealised("alch", itemId, 1, haCoins, 0, at), cb));
+	}
+
+	/**
+	 * Global-by-item realisation match. {@code want} units sold for {@code gross} (before
+	 * {@code tax}); count up to what the loot ledger still has unrealised for {@code itemId},
+	 * pro-rate the proceeds to that, return a {@link RealisedEntry} (or null - never looted,
+	 * or already fully realised).
+	 */
+	private RealisedEntry matchRealised(String kind, int itemId, long want, long gross, long tax, String at)
+	{
+		if (want <= 0 || itemId <= 0 || itemId == COINS || itemId == PLATINUM)
+		{
+			return null;
+		}
+		final long[] looted = lootedOf(entries, itemId);   // {qty, gp}
+		final long avail = looted[0] - realisedQtyOf(realised, itemId);
+		if (looted[0] <= 0 || avail <= 0)
+		{
+			return null;
+		}
+		final long take = Math.min(avail, want);
+		final long unit = looted[1] / looted[0];
+		final long g = split(gross, want, take);
+		final long t = split(tax, want, take);
+		return new RealisedEntry(REALISED_SCHEMA, kind, null, mobHint(entries, itemId),
+			itemId, take, g, t, g - t, unit * take, at);
+	}
+
+	private void appendRealised(RealisedEntry re, Consumer<Snapshot> cb)
+	{
+		if (re == null)
+		{
+			return;
+		}
+		try
+		{
+			Files.createDirectories(dir());
+			Files.write(realisedFile(), (gson.toJson(re) + "\n").getBytes(StandardCharsets.UTF_8),
+				StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+		}
+		catch (IOException e)
+		{
+			log.warn("could not append realised GP", e);
+		}
+		realised.add(re);
+		publish(cb);
+	}
+
+	/**
+	 * A bank / deposit-box move of {@code signedQty} of {@code itemId} ({@code +} = deposited,
+	 * {@code -} = withdrawn). A deposit is FIFO-attributed to run loot not already realised or
+	 * banked; a withdrawal reduces the banked quantity FIFO. {@code preferRunStart} (nullable)
+	 * is tried before the oldest-first walk.
+	 */
+	void applyBankMove(int itemId, long signedQty, String preferRunStart, Consumer<Snapshot> cb)
+	{
+		run(() ->
+		{
+			if (signedQty == 0 || itemId <= 0 || itemId == COINS || itemId == PLATINUM)
+			{
+				return;
+			}
+			final long[] looted = lootedOf(entries, itemId);
+			if (looted[0] <= 0)
+			{
+				return;
+			}
+			final long unit = looted[1] / looted[0];
+			final long take;
+			if (signedQty > 0)
+			{
+				final long avail = looted[0] - realisedQtyOf(realised, itemId)
+					- Math.max(0, bankedNetOf(banked, itemId));
+				take = Math.min(avail, signedQty);
+			}
+			else
+			{
+				take = -Math.min(Math.max(0, bankedNetOf(banked, itemId)), -signedQty);
+			}
+			if (take == 0)
+			{
+				return;
+			}
+			final BankEntry be = new BankEntry(REALISED_SCHEMA, null, mobHint(entries, itemId),
+				itemId, take, unit, Instant.now().toString());
+			try
+			{
+				Files.createDirectories(dir());
+				Files.write(bankedFile(), (gson.toJson(be) + "\n").getBytes(StandardCharsets.UTF_8),
 					StandardOpenOption.CREATE, StandardOpenOption.APPEND);
 			}
 			catch (IOException e)
 			{
-				log.warn("could not append to run history", e);
+				log.warn("could not append banked move", e);
 			}
-			entries.add(entry);
+			banked.add(be);
 			publish(cb);
 		});
+	}
+
+	/** {@code {qty, gp}} of {@code itemId} looted across every recorded run (any mob). */
+	static long[] lootedOf(List<RunRecord> entries, int itemId)
+	{
+		long qty = 0;
+		long gp = 0;
+		for (RunRecord r : entries)
+		{
+			if (r == null || r.getPerMob() == null)
+			{
+				continue;
+			}
+			for (RunRecord.MobRun mr : r.getPerMob().values())
+			{
+				if (mr == null || mr.getItems() == null)
+				{
+					continue;
+				}
+				for (long[] it : mr.getItems())
+				{
+					if (it != null && it.length >= 2 && (int) it[0] == itemId && it[1] > 0)
+					{
+						qty += it[1];
+						gp += it.length >= 3 ? it[2] : 0;
+					}
+				}
+			}
+		}
+		return new long[]{qty, gp};
+	}
+
+	/** Total quantity of {@code itemId} already matched to a realisation (GE sale or alch). */
+	private static long realisedQtyOf(List<RealisedEntry> realised, int itemId)
+	{
+		long q = 0;
+		for (RealisedEntry re : realised)
+		{
+			if (re != null && re.getItemId() == itemId)
+			{
+				q += re.getQty();
+			}
+		}
+		return q;
+	}
+
+	/** Net banked quantity of {@code itemId} (deposits minus withdrawals); can be negative transiently. */
+	private static long bankedNetOf(List<BankEntry> banked, int itemId)
+	{
+		long q = 0;
+		for (BankEntry be : banked)
+		{
+			if (be != null && be.getItemId() == itemId)
+			{
+				q += be.getQty();
+			}
+		}
+		return q;
+	}
+
+	/** Best-effort mob label for the GE Sales log - the run holding the most looted qty of the
+	 *  item. Display only, never used in a total. */
+	private static String mobHint(List<RunRecord> entries, int itemId)
+	{
+		String best = null;
+		long bestQty = 0;
+		for (RunRecord r : entries)
+		{
+			if (r == null || r.getPerMob() == null)
+			{
+				continue;
+			}
+			for (Map.Entry<String, RunRecord.MobRun> me : r.getPerMob().entrySet())
+			{
+				final RunRecord.MobRun mr = me.getValue();
+				if (me.getKey() == null || me.getKey().isEmpty() || mr == null || mr.getItems() == null)
+				{
+					continue;
+				}
+				for (long[] it : mr.getItems())
+				{
+					if (it != null && it.length >= 2 && (int) it[0] == itemId && it[1] > bestQty)
+					{
+						bestQty = it[1];
+						best = me.getKey();
+					}
+				}
+			}
+		}
+		return best;
+	}
+
+	/** {@code total * part / whole}, done as integer math that cannot overflow for realistic
+	 *  coin amounts ({@code part <= whole}). */
+	private static long split(long total, long whole, long part)
+	{
+		if (whole <= 0)
+		{
+			return 0;
+		}
+		return (total / whole) * part + ((total % whole) * part) / whole;
 	}
 
 	/** Delete history.jsonl (and its backup) and every {@code session-*.jsonl} except
@@ -220,6 +518,8 @@ class SessionHistory
 			{
 				Files.deleteIfExists(file());
 				Files.deleteIfExists(dir().resolve(BACKUP_NAME));
+				Files.deleteIfExists(realisedFile());
+				Files.deleteIfExists(bankedFile());
 				final String keep = keepSessionId == null ? "" : "session-" + keepSessionId + ".jsonl";
 				try (Stream<Path> s = Files.list(dir()))
 				{
@@ -245,6 +545,8 @@ class SessionHistory
 				log.warn("could not clear run history", e);
 			}
 			entries.clear();
+			realised.clear();
+			banked.clear();
 			publish(cb);
 		});
 	}
@@ -262,7 +564,7 @@ class SessionHistory
 
 	private void publish(Consumer<Snapshot> cb)
 	{
-		snapshot = aggregate(entries);
+		snapshot = aggregate(entries, realised, banked);
 		if (cb != null)
 		{
 			cb.accept(snapshot);
@@ -277,6 +579,101 @@ class SessionHistory
 	private Path file()
 	{
 		return dir().resolve(FILE_NAME);
+	}
+
+	private Path realisedFile()
+	{
+		return dir().resolve(REALISED_NAME);
+	}
+
+	private Path bankedFile()
+	{
+		return dir().resolve(BANKED_NAME);
+	}
+
+	private Path geSlotsFile()
+	{
+		return dir().resolve(GE_SLOTS_NAME);
+	}
+
+	/** Read {@code realised.jsonl} into {@link #realised}. Malformed lines are skipped. */
+	private void readRealisedFile() throws IOException
+	{
+		if (!Files.exists(realisedFile()))
+		{
+			return;
+		}
+		for (String line : Files.readAllLines(realisedFile(), StandardCharsets.UTF_8))
+		{
+			if (line == null || line.trim().isEmpty())
+			{
+				continue;
+			}
+			try
+			{
+				final RealisedEntry re = gson.fromJson(line, RealisedEntry.class);
+				if (re != null && re.getItemId() > 0 && re.getQty() > 0)
+				{
+					realised.add(re);
+				}
+			}
+			catch (RuntimeException ex)
+			{
+				log.debug("skipping malformed realised line", ex);
+			}
+		}
+	}
+
+	/** Read {@code banked.jsonl} into {@link #banked}. Malformed lines are skipped. */
+	private void readBankedFile() throws IOException
+	{
+		if (!Files.exists(bankedFile()))
+		{
+			return;
+		}
+		for (String line : Files.readAllLines(bankedFile(), StandardCharsets.UTF_8))
+		{
+			if (line == null || line.trim().isEmpty())
+			{
+				continue;
+			}
+			try
+			{
+				final BankEntry be = gson.fromJson(line, BankEntry.class);
+				if (be != null && be.getItemId() > 0 && be.getQty() != 0)
+				{
+					banked.add(be);
+				}
+			}
+			catch (RuntimeException ex)
+			{
+				log.debug("skipping malformed banked line", ex);
+			}
+		}
+	}
+
+	private Map<Integer, GeSaleTracker.SlotState> readGeSlots()
+	{
+		try
+		{
+			if (Files.exists(geSlotsFile()))
+			{
+				final Map<Integer, GeSaleTracker.SlotState> m = gson.fromJson(
+					new String(Files.readAllBytes(geSlotsFile()), StandardCharsets.UTF_8),
+					new TypeToken<Map<Integer, GeSaleTracker.SlotState>>()
+					{
+					}.getType());
+				if (m != null)
+				{
+					return m;
+				}
+			}
+		}
+		catch (IOException | RuntimeException ex)
+		{
+			log.warn("could not read GE slot state", ex);
+		}
+		return new HashMap<>();
 	}
 
 	/** Read history.jsonl into {@link #entries}. Older schema lines are upgraded; if any were
@@ -561,6 +958,16 @@ class SessionHistory
 
 	static Snapshot aggregate(List<RunRecord> entries)
 	{
+		return aggregate(entries, java.util.Collections.emptyList(), java.util.Collections.emptyList());
+	}
+
+	static Snapshot aggregate(List<RunRecord> entries, List<RealisedEntry> realised)
+	{
+		return aggregate(entries, realised, java.util.Collections.emptyList());
+	}
+
+	static Snapshot aggregate(List<RunRecord> entries, List<RealisedEntry> realised, List<BankEntry> banked)
+	{
 		long gained = 0;
 		long cost = 0;
 		int kills = 0;
@@ -610,12 +1017,90 @@ class SessionHistory
 			});
 		}
 
+		// GE Sales log rows (per entry, newest first) + realised totals grouped by item id
+		final List<SaleRow> sales = new ArrayList<>();
+		final Map<Integer, long[]> realisedByItem = new HashMap<>();   // id -> {qty, net, tax, gross}
+		if (realised != null)
+		{
+			for (RealisedEntry re : realised)
+			{
+				if (re == null)
+				{
+					continue;
+				}
+				sales.add(new SaleRow(re.getSoldAt(), re.getItemId(), re.getQty(), re.getGross(),
+					re.getTax(), re.getNet(), re.kindOrGe(),
+					re.getMob() == null ? UNATTRIBUTED : re.getMob()));
+				final long[] r = realisedByItem.computeIfAbsent(re.getItemId(), k -> new long[4]);
+				r[0] += re.getQty();
+				r[1] += re.getNet();
+				r[2] += re.getTax();
+				r[3] += re.getGross();
+			}
+		}
+		sales.sort(Comparator.comparing((SaleRow s) -> s.getAt() == null ? "" : s.getAt()).reversed());
+
+		final Map<Integer, Long> bankedByItem = new HashMap<>();
+		if (banked != null)
+		{
+			for (BankEntry be : banked)
+			{
+				if (be != null)
+				{
+					bankedByItem.merge(be.getItemId(), be.getQty(), Long::sum);
+				}
+			}
+		}
+
+		// global-by-item loot ledger: total looted (any mob), then how much has been sold / banked
+		final Map<Integer, long[]> lootedByItem = new LinkedHashMap<>();   // id -> {qty, gp}
 		for (MobAcc a : mobs.values())
 		{
 			gained += a.gained;
 			cost += a.cost;
 			kills += a.kills;
+			for (long[] it : a.items.values())
+			{
+				final long[] agg = lootedByItem.computeIfAbsent((int) it[0], k -> new long[2]);
+				agg[0] += it[1];
+				agg[1] += it[2];
+			}
 		}
+
+		final List<ItemStat> itemStats = new ArrayList<>();
+		long realisedNet = 0;
+		long realisedTax = 0;
+		long soldValue = 0;
+		long bankedValue = 0;
+		long unsoldValue = 0;
+		for (Map.Entry<Integer, long[]> e : lootedByItem.entrySet())
+		{
+			final int id = e.getKey();
+			final long looted = e.getValue()[0];
+			if (looted <= 0)
+			{
+				continue;
+			}
+			final long unit = e.getValue()[1] / looted;
+			final long[] r = realisedByItem.getOrDefault(id, new long[4]);
+			final long soldQty = r[0];
+			final long effSold = Math.min(soldQty, looted);          // the cap
+			final long net = soldQty > 0 ? split(r[1], soldQty, effSold) : 0;   // pro-rate over-sells
+			final long taxP = soldQty > 0 ? split(r[2], soldQty, effSold) : 0;
+			final long unsoldQty = looted - effSold;
+			final long uVal = unsoldQty * unit;
+			final long bankedNet = bankedByItem.getOrDefault(id, 0L);
+			final long bankedQty = Math.max(0, Math.min(bankedNet, unsoldQty));
+			realisedNet += net;
+			realisedTax += taxP;
+			soldValue += effSold * unit;
+			unsoldValue += uVal;
+			bankedValue += bankedQty * unit;
+			itemStats.add(new ItemStat(id, looted, looted * unit, soldQty, net, taxP, bankedNet,
+				effSold, unsoldQty, uVal));
+		}
+		itemStats.sort((x, y) -> Long.compare(y.getLootedValue(), x.getLootedValue()));
+		final long actualNet = realisedNet + unsoldValue - cost;
 
 		final List<MobStats> list = new ArrayList<>();
 		mobs.forEach((name, a) -> list.add(new MobStats(
@@ -627,7 +1112,8 @@ class SessionHistory
 		list.sort(Comparator.comparing((MobStats m) -> m.getName().isEmpty())
 			.thenComparing(Comparator.comparingLong(MobStats::getNet).reversed()));
 
-		return new Snapshot(entries.size(), gained - cost, gained, cost, kills, list);
+		return new Snapshot(entries.size(), gained - cost, gained, cost, kills, list,
+			realisedNet, realisedTax, soldValue, bankedValue, sales, actualNet, itemStats);
 	}
 
 	private static List<long[]> triples(Map<Integer, long[]> m)
@@ -656,15 +1142,32 @@ class SessionHistory
 	@Value
 	static class Snapshot
 	{
-		static final Snapshot EMPTY = new Snapshot(0, 0, 0, 0, 0, new ArrayList<>());
+		static final Snapshot EMPTY =
+			new Snapshot(0, 0, 0, 0, 0, new ArrayList<>(), 0, 0, 0, 0, new ArrayList<>(), 0, new ArrayList<>());
 
 		/** Number of runs recorded. */
 		int runs;
+		/** lifetime **potential** net = Σ (looted at snapshot) − cost. */
 		long net;
 		long gained;
 		long cost;
 		int kills;
 		List<MobStats> mobs;
+		/** lifetime realised proceeds net of tax (GE sales + High Alch), capped per item at what
+		 *  was ever looted. */
+		long realisedNet;
+		/** lifetime GE tax paid on that loot. */
+		long realisedTax;
+		/** lifetime frozen projected value of the loot that has been sold / alched. */
+		long soldValue;
+		/** lifetime frozen projected value of unsold loot currently sitting in a bank. */
+		long bankedValue;
+		/** every GE sale / High Alch, newest first, for the History "GE Sales" view. */
+		List<SaleRow> sales;
+		/** lifetime **actual** net = realised (sold) + snapshot value of everything unsold − cost. */
+		long actualNet;
+		/** the global loot ledger, one row per item, looted-value descending. */
+		List<ItemStat> items;
 	}
 
 	@Value
@@ -686,6 +1189,81 @@ class SessionHistory
 		List<long[]> items;
 		/** one row per run that touched this mob, for the drill-down. */
 		List<RunRow> runList;
+	}
+
+	/** One row of the global loot ledger: how much of an item you looted, and what became of it.
+	 *  {@code soldQty} may exceed {@code lootedQty} (bank stock sold alongside); {@code effectiveSold}
+	 *  is the capped figure and {@code soldNet} is already pro-rated to it. */
+	@Value
+	static class ItemStat
+	{
+		int itemId;
+		long lootedQty;
+		long lootedValue;
+		long soldQty;
+		long soldNet;
+		long soldTax;
+		long bankedNet;
+		long effectiveSold;
+		long unsoldQty;
+		long unsoldValue;
+	}
+
+	/** One line of {@code realised.jsonl}: a GE sale / High Alch chunk matched to a run's loot. */
+	@Value
+	static class RealisedEntry
+	{
+		int schema;
+		/** "ge" or "alch" - absent on round-18 lines, treated as "ge". */
+		String kind;
+		/** ISO instant the run started - the key into {@code history.jsonl}. */
+		String runStart;
+		String mob;
+		int itemId;
+		long qty;
+		/** gross coins received for this chunk (before tax). */
+		long gross;
+		long tax;
+		/** {@code gross - tax}. */
+		long net;
+		/** frozen projected value of {@code qty} of this item from that run. */
+		long projected;
+		String soldAt;
+
+		String kindOrGe()
+		{
+			return kind == null || kind.isEmpty() ? "ge" : kind;
+		}
+	}
+
+	/** One line of {@code banked.jsonl}: a bank / deposit-box move of a run's loot. */
+	@Value
+	static class BankEntry
+	{
+		int schema;
+		String runStart;
+		String mob;
+		int itemId;
+		/** signed: {@code +} deposited into a bank, {@code -} withdrawn back out. */
+		long qty;
+		/** frozen projected unit value of the item in that run. */
+		long unit;
+		String at;
+	}
+
+	/** One GE sale / alch, for the History "GE Sales" view. */
+	@Value
+	static class SaleRow
+	{
+		String at;
+		int itemId;
+		long qty;
+		long gross;
+		long tax;
+		long net;
+		/** "ge" or "alch". */
+		String kind;
+		String mob;
 	}
 
 	@Value

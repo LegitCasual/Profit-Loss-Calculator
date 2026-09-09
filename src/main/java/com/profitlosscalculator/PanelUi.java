@@ -92,6 +92,51 @@ final class PanelUi
 		return l;
 	}
 
+	/**
+	 * The headline net row(s) for a live run's 2-column stat grid. Normally one bold
+	 * "Potential net" cell (collected loot at GE − cost) with {@code topRight} beside it. Once
+	 * something has been alched / banked this run, "Actual net" (real proceeds + loot still held
+	 * − cost) leads in bold and "Potential net" drops to a plain sub-line below it - so a run
+	 * that's cashed out doesn't read as a pure loss.
+	 */
+	static void addNetCells(JPanel grid, ProfitLossCalculatorPanel.View view, JLabel topRight)
+	{
+		final long potential = view.getNet();
+		final boolean cashed = view.getRealisedSoFar() > 0 || view.getBankedSoFar() > 0;
+		if (cashed)
+		{
+			final long actual = view.getActualNet();
+			grid.add(statCell("Actual net", sign(actual), actual >= 0 ? GAIN_COLOR : LOSS_COLOR, true));
+			grid.add(topRight);
+			grid.add(statCell("Potential net", sign(potential),
+				potential >= 0 ? GAIN_COLOR : LOSS_COLOR, false));
+			grid.add(new JLabel());
+		}
+		else
+		{
+			grid.add(statCell("Potential net", sign(potential),
+				potential >= 0 ? GAIN_COLOR : LOSS_COLOR, true));
+			grid.add(topRight);
+		}
+	}
+
+	/** Adds "Realised" / "Banked" cells to the 2-column stat grid when loot has been alched or
+	 *  banked mid-run. Real realised / banked totals live in the History tab - this is a hint
+	 *  that something has been cashed out or secured this run. */
+	static void addRealisedSoFar(JPanel grid, ProfitLossCalculatorPanel.View view)
+	{
+		if (view.getRealisedSoFar() > 0)
+		{
+			grid.add(statCell("Realised", "+" + gpPlain(view.getRealisedSoFar()), GAIN_COLOR, false));
+			grid.add(new JLabel());
+		}
+		if (view.getBankedSoFar() > 0)
+		{
+			grid.add(statCell("Banked", gpPlain(view.getBankedSoFar()), SUPPLIES_COLOR, false));
+			grid.add(new JLabel());
+		}
+	}
+
 	static void fillGrid(JPanel grid, List<ProfitLossCalculatorPanel.GridItem> items, Color cell, ItemManager itemManager)
 	{
 		grid.removeAll();

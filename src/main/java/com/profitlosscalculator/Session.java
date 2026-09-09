@@ -46,6 +46,12 @@ class Session
 	@Setter
 	private boolean paused;
 
+	/** True for the always-on background run (auto-started on login). An explicit Session /
+	 *  Target Farm / Slayer run is not ambient - it takes the foreground and the ambient run
+	 *  resumes after it stops. */
+	@Setter
+	private boolean ambient;
+
 	@Setter
 	private RunMode mode = RunMode.SESSION;
 
@@ -67,6 +73,10 @@ class Session
 
 	/** Runes consumed by spell casts this session: rune item id -&gt; quantity. */
 	private final Map<Integer, Integer> runesUsed = new LinkedHashMap<>();
+
+	/** Looted items High Alched this session: item id -&gt; quantity. Kept out of the potential
+	 *  ("gained") rollup and recorded as realised at Stop instead. */
+	private final Map<Integer, Integer> alchedItems = new LinkedHashMap<>();
 
 	private int deathSeq;
 
@@ -233,6 +243,15 @@ class Session
 	void addRunes(Map<Integer, Integer> runes)
 	{
 		runes.forEach((id, qty) -> runesUsed.merge(id, qty, Integer::sum));
+	}
+
+	/** Record a looted item that was High Alched this session. */
+	void addAlchedItem(int itemId, int qty)
+	{
+		if (itemId > 0 && qty > 0)
+		{
+			alchedItems.merge(itemId, qty, Integer::sum);
+		}
 	}
 
 	BossKill lastKill()
