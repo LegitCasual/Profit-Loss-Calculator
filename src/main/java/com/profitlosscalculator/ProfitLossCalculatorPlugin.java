@@ -281,6 +281,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  Plain session only. */
 	private final SkillingTracker skillingTracker = new SkillingTracker();
 
+	/** Blue Moon's Weapon Freeze special rips the wielded weapon out and encases it in ice for
+	 *  a few ticks, then hands it straight back - without this the weapon leaving the equipment
+	 *  slot reads as a loss (thrown-weapon stack "fired" / skilling material) and its return as
+	 *  loot. Keyed off {@link VarbitID#PMOON_BOSS_BLUE_WEARPREVENT}. */
+	private final BlueMoonWeaponFreeze blueMoonFreeze = new BlueMoonWeaponFreeze();
+
 	/** Watches GE sell offers so completed sales can be matched back to the loot that produced
 	 *  them (see {@link SessionHistory#applySale}). */
 	private final GeSaleTracker geSaleTracker = new GeSaleTracker();
@@ -740,6 +746,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		ammoTracker.reset(ammoOwned());
 		chargedWeaponTracker.reset();
 		skillingTracker.reset(currentSkillXp());
+		blueMoonFreeze.reset();
 		pickupTracker.reset();
 		lootCollector.clear();
 		dropIntent.clear();
@@ -1326,6 +1333,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		pushStateHistory();
 		trackOpponent();
 
+		// Blue Moon's Weapon Freeze special seals the wielded weapon in a block of ice for a few
+		// ticks and then hands it straight back - keep that round trip out of the ammo / skilling
+		// / loot diffs below.
+		blueMoonFreeze.update(
+			client.getVarbitValue(VarbitID.PMOON_BOSS_BLUE_WEARPREVENT) > 0,
+			weaponSlotItem(), client.getTickCount());
+		final boolean weaponFrozen = blueMoonFreeze.active(client.getTickCount());
+
 		if (session.isAmbient()
 			&& client.getTickCount() - lastAmbientCheckpointTick >= AMBIENT_CHECKPOINT_TICKS
 			&& (collectedTotal() > 0 || session.total() > 0))
@@ -1340,7 +1355,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// real fire/pickup just because one half of it landed before the other.
 		final boolean accrue = deathWindowTicks == 0 && !bankOpen && !session.isPaused();
 
-		reconcileAmmo(accrue);
+		// a thrown weapon ripped from the slot by Blue Moon's ice and handed back is not fired ammo
+		reconcileAmmo(accrue && !weaponFrozen);
 
 		// teleport charge drops and ground pickups are read once per tick so equipping /
 		// unequipping jewellery (item moves inv<->worn within a tick, net zero) never looks
@@ -1354,8 +1370,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			detectTeleports(prevTickItems, curItems);
 			final Map<Integer, Integer> losses = ContainerSnapshot.lost(prevTickItems, curItems);
-			trackDrops(losses);
 			final Map<Integer, Integer> gains = ContainerSnapshot.lost(curItems, prevTickItems);
+			// the weapon Blue Moon froze in ice vanishing here (and reappearing a few ticks later
+			// when the ice is broken) is neither a loss nor loot - drop it from both sides before
+			// anything downstream can claim it
+			blueMoonFreeze.filter(losses, gains);
+			trackDrops(losses);
 			// a food / potion that actually left the inventory after an Eat/Drink click - the
 			// real "you consumed one" signal, as opposed to how many times the button was hit.
 			// Clears the consumed item (and the lower-dose potion it turned into) from both maps
@@ -2440,6 +2460,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			}
 		}
 		owned.merge(item.getId(), (long) item.getQuantity(), Long::sum);
+	}
+
+	/** {@code {itemId, quantity}} of whatever is in the equipped weapon slot, or {@code null}
+	 *  when the slot is empty - fed to {@link #blueMoonFreeze}. */
+	private long[] weaponSlotItem()
+	{
+		final ItemContainer worn = client.getItemContainer(InventoryID.WORN);
+		final Item w = worn == null ? null : worn.getItem(WEAPON_SLOT);
+		return w == null || w.getId() <= 0 || w.getQuantity() <= 0
+			? null : new long[]{w.getId(), w.getQuantity()};
 	}
 
 	private void reconcileAmmo(boolean accrue)
