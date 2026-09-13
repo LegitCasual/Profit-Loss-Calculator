@@ -154,7 +154,8 @@ class TargetedContent extends JPanel
 	/** The shared field/button pair: Start a new farm when idle, or add another mob to the
 	 *  group when one is already running/paused. Clears the field after a successful add so
 	 *  it's ready for the next name - "type, Add, type the next one, Add". A collective label
-	 *  ("Moons of Peril", ...) expands to all of its bosses at once. */
+	 *  ("Dagannoth Kings", ...) expands to all of its bosses at once - a shared-chest label like
+	 *  "Moons of Peril" or "Barrows" is a single atomic target instead, see KnownMobNames. */
 	private void submitMobField()
 	{
 		final java.util.List<String> mobs = KnownMobNames.expand(mobField.getText());

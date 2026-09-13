@@ -86,13 +86,33 @@ public class KnownMobNamesTest
 	public void collectiveLabelsExpandToTheirBosses()
 	{
 		assertEquals(
-			java.util.Arrays.asList("Blood Moon", "Blue Moon", "Eclipse Moon"),
-			KnownMobNames.expand("Moons of Peril"));
-		assertEquals(
 			java.util.Arrays.asList("Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"),
 			KnownMobNames.expand("dagannoth kings"));
 		// a leading "The " on the label is optional
 		assertEquals(2, KnownMobNames.expand("Royal Titans").size());
+	}
+
+	@Test
+	public void moonsOfPerilIsAnAtomicLabelNotAGroup()
+	{
+		// a shared-chest encounter is farmed under one label, not expanded into sub-bosses -
+		// see ProfitLossCalculatorPlugin's CHEST_RUN_LABEL_BY_LOOT_NAME
+		assertEquals(java.util.Collections.singletonList("Moons of Peril"),
+			KnownMobNames.expand("Moons of Peril"));
+		assertTrue(contains("Moons of Peril"));
+		// the individual bosses stay separately searchable/farmable in their own right too
+		assertTrue(contains("Blood Moon"));
+		assertTrue(contains("Blue Moon"));
+		assertTrue(contains("Eclipse Moon"));
+	}
+
+	@Test
+	public void containsSharedChestEncountersAsAtomicLabels()
+	{
+		assertTrue(contains("Barrows"));
+		assertTrue(contains("Chambers of Xeric"));
+		assertTrue(contains("Theatre of Blood"));
+		assertTrue(contains("Tombs of Amascut"));
 	}
 
 	@Test

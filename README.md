@@ -88,8 +88,12 @@ A **History** button sits above a dropdown that switches between the four modes.
   width, one above the other.
 - The search box knows every Slayer creature plus the bosses that have no task (Nex, the
   Nightmare, Corporeal Beast, Scurrius, Yama, the Hueycoatl, ...). The **collective labels**
-  *Moons of Peril*, *Dagannoth Kings* and *The Royal Titans* drop every boss of that
-  encounter into the farm in one go.
+  *Dagannoth Kings* and *The Royal Titans* drop every boss of that encounter into the farm in
+  one go.
+- Shared-chest encounters (*Barrows*, *Moons of Peril*, *Chambers of Xeric*, *Theatre of
+  Blood*, *Tombs of Amascut*) are farmed under that one name instead - the underlying kills
+  don't drop anything on their own, so a run is counted the moment its chest is looted, with
+  the chest's loot as that run's gain.
 - **Summary block** - the combined total across every target: Net, **GP/kill**, Gains, Losses,
   gp/hr.
 - **Per mob** - only shown once you've added more than one target: one block per mob, each

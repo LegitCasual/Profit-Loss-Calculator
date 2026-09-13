@@ -139,6 +139,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  the real death). Awakened variants may need their own name added here. */
 	private static final Set<String> PHASE_DEATH_MOBS = Collections.singleton("the whisperer");
 
+	/**
+	 * Multi-NPC / raid encounters whose only reward is a single shared chest, keyed by the
+	 * chest's {@code LootReceived} source name (verified against RuneLite's own
+	 * {@code LootTrackerPlugin} source, not guessed) -&gt; the Target Farm label a run of it is
+	 * counted against. The client gives no reliable way to attribute a shared chest to which of
+	 * the underlying NPCs actually died (RuneLite's own {@code !kc} chat command treats a chest
+	 * opening as the whole kill count for exactly this content - {@code !kc barrows}, {@code !kc
+	 * lunar chest} - not a count of individual brothers/bosses), so a farm targeting one of these
+	 * labels counts a "kill" the moment its chest is looted rather than off any individual boss's
+	 * {@code ActorDeath} - which for some of them (Perilous Moons) doesn't even fire in a way the
+	 * client can see. See {@link #onLootReceived}. Each label is a plain, atomic entry in
+	 * {@link KnownMobNames} (not a {@code GROUPS} label that expands to sub-names) - farming
+	 * "Moons of Peril" targets this one bucket, not three.
+	 */
+	private static final Map<String, String> CHEST_RUN_LABEL_BY_LOOT_NAME = new LinkedHashMap<>();
+	static
+	{
+		CHEST_RUN_LABEL_BY_LOOT_NAME.put("barrows", "Barrows");
+		CHEST_RUN_LABEL_BY_LOOT_NAME.put("lunar chest", "Moons of Peril");
+		CHEST_RUN_LABEL_BY_LOOT_NAME.put("chambers of xeric", "Chambers of Xeric");
+		CHEST_RUN_LABEL_BY_LOOT_NAME.put("theatre of blood", "Theatre of Blood");
+		CHEST_RUN_LABEL_BY_LOOT_NAME.put("tombs of amascut", "Tombs of Amascut");
+	}
+
 	/** Rune-pouch slots: type (which rune) and quantity, read alongside inv + worn so runes
 	 *  picked up straight into the pouch still count as loot collected. */
 	private static final int[] RUNE_POUCH_TYPE_VARBITS = {
@@ -1697,6 +1721,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 * An NPC died. A grouped run (Targeted farm or Slayer task) opens a per-kill bucket only
 	 * for mobs matching its target group; a plain session bumps the per-mob kill tally (no
 	 * bucket, no loot attribution). Either way a matched kill is counted against its mob name.
+	 * (A chest-run label like "Moons of Peril" or "Barrows" is never one of {@code npc}'s real
+	 * names, so this naturally never fires for one of those - see {@link #onLootReceived}.)
 	 */
 	private void handleNpcKill(NPC npc)
 	{
@@ -1877,6 +1903,20 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				kill = openKill(key, tick, "loot");
 			}
 			kill.add(ie);
+		}
+		else if (session.isGrouped())
+		{
+			// A shared reward chest (Barrows, Perilous Moons, a raid, ...) - see
+			// CHEST_RUN_LABEL_BY_LOOT_NAME. The chest opening itself is the kill, one per loot
+			// event, counted (and its loot attributed) only when the farm is actually targeting
+			// that label - anything else stays stray, un-netted income.
+			final String label = CHEST_RUN_LABEL_BY_LOOT_NAME.get(
+				Text.removeTags(source).trim().toLowerCase(Locale.ROOT));
+			if (label != null && session.matchesTarget(label, slayerTracker))
+			{
+				kill = openKill(label, client.getTickCount(), "chest");
+				kill.add(ie);
+			}
 		}
 		else if (type == IncomeEvent.Type.NPC_LOOT && !session.isGrouped() && isPhaseDeathMob(source))
 		{
@@ -3213,13 +3253,27 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final Map<String, Map<Integer, Integer>> got = new LinkedHashMap<>();
 		final Map<String, Map<Integer, Integer>> drop = new LinkedHashMap<>();
 
+		// an event bucketed into a BossKill belongs to that kill's mob regardless of its own
+		// `source` label - a shared reward (e.g. Perilous Moons' Lunar Chest) is named after
+		// the chest, not any one boss - so this rollup agrees with the live view's
+		// killAttributed()/net instead of re-deriving attribution from the source string alone.
+		final Map<IncomeEvent, String> killMobOf = new java.util.IdentityHashMap<>();
+		for (BossKill k : session.getKills())
+		{
+			for (IncomeEvent d : k.getDrops())
+			{
+				killMobOf.put(d, k.getName());
+			}
+		}
+
 		for (IncomeEvent e : session.getIncome())
 		{
 			if (e.getType() == IncomeEvent.Type.PICKUP)
 			{
 				continue; // ground pickups have no mob
 			}
-			final String mob = Text.removeTags(e.getSource() == null ? "" : e.getSource()).trim();
+			final String mob = killMobOf.getOrDefault(e,
+				Text.removeTags(e.getSource() == null ? "" : e.getSource()).trim());
 			if (mob.isEmpty() || lootValue(e.getItems()) < floor || !keep.test(mob))
 			{
 				continue;
