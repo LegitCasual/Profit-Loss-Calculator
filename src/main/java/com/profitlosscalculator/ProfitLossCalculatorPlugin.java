@@ -359,7 +359,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		@Override
 		public int ge(int itemId)
 		{
-			return itemManager.getItemPrice(itemId);
+			return (int) itemManager.getItemPrice(itemId);
 		}
 
 		@Override

@@ -51,7 +51,7 @@ class SpellCostService
 
 	Priced price(Spell spell)
 	{
-		return price(spell, equippedRuneSources(), id -> Math.max(0, itemManager.getItemPrice(id)));
+		return price(spell, equippedRuneSources(), id -> Math.max(0, (int) itemManager.getItemPrice(id)));
 	}
 
 	/** Pure core: exposed for unit testing with a fake price function and staff set. */
