@@ -57,7 +57,7 @@ public interface ProfitLossCalculatorConfig extends Config
 	@ConfigItem(
 		keyName = "showOverlay",
 		name = "In-game overlay",
-		description = "Show the running session net and kill tally as an overlay while a session is running",
+		description = "Show a compact net / net-per-hour badge while a session is running - hover it for the full breakdown",
 		position = 1
 	)
 	default boolean showOverlay()
