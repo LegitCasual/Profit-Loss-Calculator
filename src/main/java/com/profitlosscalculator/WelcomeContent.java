@@ -25,8 +25,8 @@ import net.runelite.client.util.LinkBrowser;
  */
 class WelcomeContent extends JPanel
 {
-	static final String REPO_URL = "https://github.com/LegitCasual/Runelite---profit-loss";
-	private static final String ISSUES_URL = REPO_URL + "/issues";
+	static final String REPO_URL = "https://github.com/LegitCasual/Profit-Loss-Calculator";
+	static final String ISSUES_URL = REPO_URL + "/issues";
 
 	/** A calmer green than the Session tab's start button - this screen isn't urgent. */
 	private static final Color CONTINUE_GREEN = new Color(92, 143, 100);

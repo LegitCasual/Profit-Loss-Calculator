@@ -16,7 +16,9 @@ import lombok.Builder;
 import lombok.Singular;
 import lombok.Value;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 /**
  * Sidebar panel. A History button sits above a dropdown that picks between the three tracking
@@ -279,8 +281,20 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		bodyHost.add(modeHost, CARD_MODES);
 		bodyHost.add(historyContent, CARD_HISTORY);
 
+		// Bug-report link under every tab (modes and History alike), so it outlives the
+		// first-run screen that used to be its only home.
+		final JButton reportIssue = new JButton("Report an issue / suggest a feature");
+		reportIssue.setFocusPainted(false);
+		reportIssue.setFont(FontManager.getRunescapeSmallFont());
+		reportIssue.setToolTipText("Opens the plugin's GitHub issues page");
+		reportIssue.addActionListener(e -> LinkBrowser.browse(WelcomeContent.ISSUES_URL));
+		final JPanel footer = new JPanel(new BorderLayout());
+		footer.setBorder(BorderFactory.createEmptyBorder(12, 10, 10, 10));
+		footer.add(reportIssue, BorderLayout.CENTER);
+
 		contentHost.add(navBar, BorderLayout.NORTH);
 		contentHost.add(bodyHost, BorderLayout.CENTER);
+		contentHost.add(footer, BorderLayout.SOUTH);
 
 		welcome = new WelcomeContent(this::dismissWelcome);
 		add(showWelcome ? welcome : contentHost, BorderLayout.CENTER);
