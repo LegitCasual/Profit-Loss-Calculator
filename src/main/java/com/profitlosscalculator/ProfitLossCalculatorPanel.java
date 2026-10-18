@@ -74,6 +74,15 @@ class ProfitLossCalculatorPanel extends PluginPanel
 
 		/** The first-run screen's Continue button was clicked - persist that it's been seen. */
 		void onWelcomeDismissed();
+
+		/** The "What's new" screen's OK button was clicked - persist which release was seen. */
+		void onWhatsNewDismissed();
+	}
+
+	/** Which one-off screen, if any, stands in for the tabs when the panel first opens. */
+	enum Notice
+	{
+		NONE, WELCOME, WHATS_NEW
 	}
 
 	/** One item cell in a gain / loss grid. */
@@ -237,11 +246,12 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	private final HistoryContent historyContent;
 	private final ItemsContent itemsContent;
 
-	/** Holds the nav bar + body. Swapped out for {@link #welcome} on first run. */
+	/** Holds the nav bar + body. Swapped out for {@link #notice} on first run / after an update. */
 	private final JPanel contentHost = new JPanel(new BorderLayout());
-	private final WelcomeContent welcome;
+	/** The welcome or "What's new" screen currently covering the tabs, or {@code null}. */
+	private JPanel notice;
 
-	ProfitLossCalculatorPanel(Controls controls, ItemManager itemManager, boolean showWelcome)
+	ProfitLossCalculatorPanel(Controls controls, ItemManager itemManager, Notice startNotice)
 	{
 		this.controls = controls;
 		this.sessionContent = new SessionContent(controls, itemManager);
@@ -296,15 +306,25 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		contentHost.add(bodyHost, BorderLayout.CENTER);
 		contentHost.add(footer, BorderLayout.SOUTH);
 
-		welcome = new WelcomeContent(this::dismissWelcome);
-		add(showWelcome ? welcome : contentHost, BorderLayout.CENTER);
+		switch (startNotice)
+		{
+			case WELCOME:
+				notice = new WelcomeContent(() -> dismissNotice(controls::onWelcomeDismissed));
+				break;
+			case WHATS_NEW:
+				notice = new WhatsNewContent(() -> dismissNotice(controls::onWhatsNewDismissed));
+				break;
+			default:
+				notice = null;
+		}
+		add(notice != null ? notice : contentHost, BorderLayout.CENTER);
 
 		render(View.builder().build());
 	}
 
 	/** History button flip: "History" navigates to the lifetime record, "◀  Back" returns to
 	 *  whichever tracking mode is selected in the dropdown. Mirrors the exact swap technique
-	 *  {@link #dismissWelcome} uses for the first-run screen. */
+	 *  {@link #dismissNotice} uses for the first-run screen. */
 	private void toggleHistory()
 	{
 		showingHistory = !showingHistory;
@@ -317,18 +337,19 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		bodyLayout.show(bodyHost, showingHistory ? CARD_HISTORY : CARD_MODES);
 	}
 
-	/** Leave the first-run screen for good and reveal the panel. */
-	private void dismissWelcome()
+	/** Leave the welcome / "What's new" screen for good and reveal the panel. */
+	private void dismissNotice(Runnable persist)
 	{
-		if (welcome.getParent() == null)
+		if (notice == null || notice.getParent() == null)
 		{
 			return;
 		}
-		remove(welcome);
+		remove(notice);
+		notice = null;
 		add(contentHost, BorderLayout.CENTER);
 		revalidate();
 		repaint();
-		controls.onWelcomeDismissed();
+		persist.run();
 	}
 
 	void renderHistory(SessionHistory.Snapshot lifetime, java.util.Map<Integer, String> itemNames)

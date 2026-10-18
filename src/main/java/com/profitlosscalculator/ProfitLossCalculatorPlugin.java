@@ -440,7 +440,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	protected void startUp()
 	{
 		migrateSettings();
-		panel = new ProfitLossCalculatorPanel(this, itemManager, !config.welcomeSeen());
+		panel = new ProfitLossCalculatorPanel(this, itemManager, startNotice());
 
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "panel_icon.png");
 		navButton = NavigationButton.builder()
@@ -720,6 +720,27 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	public void onWelcomeDismissed()
 	{
 		config.welcomeSeen(true);
+		// a fresh install already has the latest notes - don't follow the welcome with them
+		config.whatsNewSeen(WhatsNewContent.VERSION);
+	}
+
+	@Override
+	public void onWhatsNewDismissed()
+	{
+		config.whatsNewSeen(WhatsNewContent.VERSION);
+	}
+
+	/** Welcome on a fresh install; "What's new" for an existing user who hasn't confirmed this
+	 *  release's notes yet (including everyone updating from before the screen existed). */
+	private ProfitLossCalculatorPanel.Notice startNotice()
+	{
+		if (!config.welcomeSeen())
+		{
+			return ProfitLossCalculatorPanel.Notice.WELCOME;
+		}
+		return WhatsNewContent.isUnseen(config.whatsNewSeen())
+			? ProfitLossCalculatorPanel.Notice.WHATS_NEW
+			: ProfitLossCalculatorPanel.Notice.NONE;
 	}
 
 	// ------------------------------------------------------------------ session lifecycle
@@ -1739,6 +1760,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			return;
 		}
+		// a boss's add (a Husk mid-Phosani, ...) is part of that boss's fight, not a kill of
+		// its own - see EncounterAdds
+		if (!encounterName(name).equals(name))
+		{
+			return;
+		}
 		final int tick = client.getTickCount();
 
 		if (!session.isGrouped())
@@ -1784,10 +1811,48 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			final String name = Text.removeTags(foe.getName() == null ? "" : foe.getName()).trim();
 			if (!name.isEmpty())
 			{
-				currentOpponent = name;
+				currentOpponent = encounterName(name);
 				opponentTick = client.getTickCount();
 			}
 		}
+	}
+
+	/** {@code npcName}, or the boss it is an add of when that boss is in the scene - so supplies
+	 *  spent on Phosani's Husks / Parasites / Totems are charged to Phosani. See
+	 *  {@link EncounterAdds}. Only walks the scene's NPCs for a known add name. A grouped run
+	 *  that targets the add itself but not its boss (a rats task in Scurrius's lair) keeps the
+	 *  add's own name, so those kills and costs still count toward it. */
+	private String encounterName(String npcName)
+	{
+		if (!EncounterAdds.isAdd(npcName))
+		{
+			return npcName;
+		}
+		final String boss = bossInScene(npcName);
+		if (session.isGrouped() && session.matchesTarget(npcName, slayerTracker)
+			&& !session.matchesTarget(boss, slayerTracker))
+		{
+			return npcName;
+		}
+		return boss;
+	}
+
+	private String bossInScene(String npcName)
+	{
+		final WorldView wv = client.getTopLevelWorldView();
+		if (wv == null)
+		{
+			return npcName;
+		}
+		final List<String> present = new ArrayList<>();
+		for (NPC npc : wv.npcs())
+		{
+			if (npc != null && npc.getName() != null)
+			{
+				present.add(Text.removeTags(npc.getName()).trim());
+			}
+		}
+		return EncounterAdds.resolve(npcName, present);
 	}
 
 	/** The mob a cost incurred right now belongs to: whoever we are fighting (kept sticky a few

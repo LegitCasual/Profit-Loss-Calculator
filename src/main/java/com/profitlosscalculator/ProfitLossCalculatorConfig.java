@@ -296,4 +296,24 @@ public interface ProfitLossCalculatorConfig extends Config
 		hidden = true
 	)
 	void welcomeSeen(boolean seen);
+
+	// Internal state - the WhatsNewContent.VERSION whose notes were last confirmed.
+	@ConfigItem(
+		keyName = "whatsNewSeen",
+		name = "whatsNewSeen",
+		description = "Internal - version of the last \"What's new\" screen confirmed",
+		hidden = true
+	)
+	default String whatsNewSeen()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "whatsNewSeen",
+		name = "whatsNewSeen",
+		description = "Internal - version of the last \"What's new\" screen confirmed",
+		hidden = true
+	)
+	void whatsNewSeen(String version);
 }
