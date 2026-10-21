@@ -46,10 +46,13 @@ enum Staff
 		ItemID.MIST_BATTLESTAFF, ItemID.MYSTIC_MIST_BATTLESTAFF),
 	DUST(EnumSet.of(Rune.AIR, Rune.EARTH),
 		ItemID.DUST_BATTLESTAFF, ItemID.MYSTIC_DUST_BATTLESTAFF),
+	// its free second cast on bolt/blast/wave spells costs nothing, so only the runes matter
+	TWINFLAME(EnumSet.of(Rune.WATER, Rune.FIRE), ItemID.TWINFLAME_STAFF),
 
 	KODAI(EnumSet.of(Rune.WATER), ItemID.KODAI_WAND),
 	TOME_OF_FIRE(EnumSet.of(Rune.FIRE), ItemID.TOME_OF_FIRE),
-	TOME_OF_WATER(EnumSet.of(Rune.WATER), ItemID.TOME_OF_WATER);
+	TOME_OF_WATER(EnumSet.of(Rune.WATER), ItemID.TOME_OF_WATER),
+	TOME_OF_EARTH(EnumSet.of(Rune.EARTH), ItemID.TOME_OF_EARTH);
 
 	private final Set<Rune> runes;
 	private final int[] itemIds;

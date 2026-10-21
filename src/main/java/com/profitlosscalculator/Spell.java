@@ -154,6 +154,23 @@ enum Spell
 		return BY_COMPONENT.get(componentId);
 	}
 
+	/** Lookup by in-game spell name (case-insensitive), or null. */
+	static Spell byName(String name)
+	{
+		if (name == null)
+		{
+			return null;
+		}
+		for (Spell s : values())
+		{
+			if (s.displayName.equalsIgnoreCase(name))
+			{
+				return s;
+			}
+		}
+		return null;
+	}
+
 	private static Map<Rune, Integer> r(Object... kv)
 	{
 		EnumMap<Rune, Integer> map = new EnumMap<>(Rune.class);

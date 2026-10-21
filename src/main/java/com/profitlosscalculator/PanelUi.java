@@ -7,10 +7,15 @@ package com.profitlosscalculator;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -343,6 +348,66 @@ final class PanelUi
 		l.setBorder(BorderFactory.createEmptyBorder(2, 0, 3, 0));
 		l.setAlignmentX(Component.LEFT_ALIGNMENT);
 		return l;
+	}
+
+	/** A section header with a control (e.g. {@link #orderToggle}) pinned to its right. */
+	static JPanel sectionHeader(String text, Component right)
+	{
+		final JPanel row = new JPanel(new BorderLayout());
+		row.setOpaque(false);
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
+		row.add(sectionLabel(text), BorderLayout.WEST);
+		row.add(right, BorderLayout.EAST);
+		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+		return row;
+	}
+
+	/** A small clickable "Newest first" / "Oldest first" label for a time-ordered list. */
+	static JLabel orderToggle(Runnable onClick)
+	{
+		final JLabel l = new JLabel();
+		l.setFont(FontManager.getRunescapeSmallFont());
+		l.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		l.setToolTipText("Flip the list order");
+		l.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		l.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				onClick.run();
+			}
+
+			@Override
+			public void mouseEntered(MouseEvent e)
+			{
+				l.setForeground(Color.WHITE);
+			}
+
+			@Override
+			public void mouseExited(MouseEvent e)
+			{
+				l.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+			}
+		});
+		return l;
+	}
+
+	static String orderText(boolean newestFirst)
+	{
+		return newestFirst ? "Newest first" : "Oldest first";
+	}
+
+	/** {@code lines} (held oldest first) in the order the panel should show them. */
+	static <T> List<T> ordered(List<T> lines, boolean newestFirst)
+	{
+		if (!newestFirst)
+		{
+			return lines;
+		}
+		final List<T> reversed = new ArrayList<>(lines);
+		Collections.reverse(reversed);
+		return reversed;
 	}
 
 	static Component vgap(int h)

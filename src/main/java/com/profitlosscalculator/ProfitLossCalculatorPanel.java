@@ -77,6 +77,9 @@ class ProfitLossCalculatorPanel extends PluginPanel
 
 		/** The "What's new" screen's OK button was clicked - persist which release was seen. */
 		void onWhatsNewDismissed();
+
+		/** A Costs list header's order toggle was clicked - flip newest / oldest first. */
+		void onToggleCostOrder();
 	}
 
 	/** Which one-off screen, if any, stands in for the tabs when the panel first opens. */
@@ -145,7 +148,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	}
 
 	@Value
-	@Builder
+	@Builder(toBuilder = true)
 	static class View
 	{
 		boolean active;
@@ -188,6 +191,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		long bankedSoFar;
 		boolean showIncomeList;
 		boolean showCostList;
+		boolean costsNewestFirst;
 		@Singular
 		List<GridItem> gainItems;
 		@Singular

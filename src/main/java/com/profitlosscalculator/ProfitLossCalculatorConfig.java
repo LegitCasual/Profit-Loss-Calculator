@@ -316,4 +316,24 @@ public interface ProfitLossCalculatorConfig extends Config
 		hidden = true
 	)
 	void whatsNewSeen(String version);
+
+	// Internal state - flipped from the Costs list header, not the config panel.
+	@ConfigItem(
+		keyName = "costsNewestFirst",
+		name = "costsNewestFirst",
+		description = "Internal - show the Costs list newest first",
+		hidden = true
+	)
+	default boolean costsNewestFirst()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "costsNewestFirst",
+		name = "costsNewestFirst",
+		description = "Internal - show the Costs list newest first",
+		hidden = true
+	)
+	void costsNewestFirst(boolean newestFirst);
 }

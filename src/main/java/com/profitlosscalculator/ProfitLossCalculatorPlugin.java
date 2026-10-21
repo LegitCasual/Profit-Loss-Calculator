@@ -44,6 +44,7 @@ import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
+import net.runelite.api.ParamID;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.Tile;
@@ -102,6 +103,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	/** Ticks after death during which we watch the containers for the item loss. Items can
 	 *  be reclaimed almost instantly, so we track the *worst* dip, not a fixed snapshot. */
 	private static final int DEATH_WINDOW_TICKS = 10;
+
+	/** {@code COM_MODE} value while a staff is autocasting (script4357; defensive or not). */
+	private static final int COM_MODE_AUTOCAST = 4;
+	/** How long a manual cast's click may wait (walking into range) for its magic XP drop. */
+	private static final int MANUAL_CAST_XP_TICKS = 10;
 
 	/** Per-tick inventory+equipment snapshots kept so a death can diff against the past. */
 	private static final int STATE_HISTORY_TICKS = 6;
@@ -258,6 +264,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	// spell-cast de-dup within a game tick
 	private int lastCastTick = -1;
 	private int lastCastComponent = -1;
+	// autocasts have no click - each one is charged off the magic XP drop it gives. A manual
+	// cast claims the next drop so it isn't charged twice.
+	private int lastMagicXp = -1;
+	private int manualCastTick = -1;
 
 	// consumables are charged on the inventory drop that follows an Eat/Drink click, not on
 	// the click itself - spam-clicking "Drink" fires many MenuOptionClicked but only one dose
@@ -730,6 +740,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		config.whatsNewSeen(WhatsNewContent.VERSION);
 	}
 
+	@Override
+	public void onToggleCostOrder()
+	{
+		clientThread.invoke(() ->
+		{
+			config.costsNewestFirst(!config.costsNewestFirst());
+			refreshView();
+		});
+	}
+
 	/** Welcome on a fresh install; "What's new" for an existing user who hasn't confirmed this
 	 *  release's notes yet (including everyone updating from before the screen existed). */
 	private ProfitLossCalculatorPanel.Notice startNotice()
@@ -1084,6 +1104,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			// drop the skill-XP baseline - a relogin fires a StatChanged storm with the real
 			// totals, which would otherwise register as one huge "action" per skill
 			skillingTracker.reset(Collections.emptyMap());
+			lastMagicXp = -1;
 		}
 		if (state == GameState.LOGGING_IN || state == GameState.HOPPING || state == GameState.CONNECTION_LOST)
 		{
@@ -1305,6 +1326,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// always fed in (even idle) so the XP baseline stays current; reconcileSkilling reads
 		// the active skill off it once per tick
 		skillingTracker.record(event.getSkill(), event.getXp(), client.getTickCount());
+		if (event.getSkill() == Skill.MAGIC)
+		{
+			onMagicXp(event.getXp());
+		}
 	}
 
 	/** Current total XP of every tracked skill, for seeding {@link #skillingTracker}. Empty
@@ -2818,22 +2843,85 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	private void recordCast(int componentId, int targetItemId)
 	{
+		final int tick = client.getTickCount();
+		// any manual cast - priced or not - owns the magic XP drop it produces
+		manualCastTick = tick;
 		final Spell spell = Spell.byComponent(componentId);
 		if (spell == null)
 		{
 			return;
 		}
-		final int tick = client.getTickCount();
 		if (tick == lastCastTick && componentId == lastCastComponent)
 		{
 			return;
 		}
 		lastCastTick = tick;
 		lastCastComponent = componentId;
+		chargeSpell(spell, targetItemId, false);
+	}
 
+	/** A magic XP gain - when it isn't a manual cast's, it's one autocast (splashes give XP
+	 *  too; the twinflame staff's free second hit gives none). */
+	private void onMagicXp(int xp)
+	{
+		final int prev = lastMagicXp;
+		lastMagicXp = xp;
+		if (prev < 0 || xp <= prev || !accruing())
+		{
+			return;
+		}
+		if (manualCastTick >= 0 && client.getTickCount() - manualCastTick <= MANUAL_CAST_XP_TICKS)
+		{
+			manualCastTick = -1;
+			return;
+		}
+		final Spell spell = autocastSpell();
+		if (spell != null)
+		{
+			chargeSpell(spell, -1, true);
+		}
+	}
+
+	/** The spell being autocast at a target right now, or null. */
+	private Spell autocastSpell()
+	{
+		final Player me = client.getLocalPlayer();
+		if (me == null || me.getInteracting() == null
+			|| client.getVarpValue(VarPlayerID.COM_MODE) != COM_MODE_AUTOCAST)
+		{
+			return null;
+		}
+		final int obj = client.getVarpValue(VarPlayerID.AUTOCAST_SPELL_OBJ);
+		if (obj <= 0)
+		{
+			return null;
+		}
+		// the spell obj carries its spellbook button, which is what Spell is keyed on
+		final ItemComposition def = client.getItemDefinition(obj);
+		final int button = def.getIntValue(ParamID.SPELL_BUTTON);
+		final String name = def.getStringValue(ParamID.SPELL_NAME);
+		Spell spell = Spell.byComponent(button);
+		if (spell == null)
+		{
+			spell = Spell.byName(name);
+		}
+		if (spell == null)
+		{
+			logger.line("autocast_unknown")
+				.put("obj", obj)
+				.put("button", button)
+				.put("name", name)
+				.submit();
+		}
+		return spell;
+	}
+
+	private void chargeSpell(Spell spell, int targetItemId, boolean autocast)
+	{
 		final SpellCostService.Priced priced = spellCostService.price(spell);
 		session.add(new CostEvent(CostEvent.Type.SPELL, Instant.now(),
-			-1, 1, priced.getGp(), spell.getDisplayName(), priced.getBreakdown()));
+			-1, 1, priced.getGp(), spell.getDisplayName() + (autocast ? " (autocast)" : ""),
+			priced.getBreakdown()));
 		session.addMobCost(costMob(), priced.getGp());
 		final Map<Integer, Integer> runeIds = new HashMap<>();
 		priced.getRunesUsed().forEach((r, q) -> runeIds.merge(r.getItemId(), q, Integer::sum));
@@ -2845,6 +2933,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		logger.line("spell_cast")
 			.put("spell", spell.getDisplayName())
+			.put("autocast", autocast)
 			.put("gp", priced.getGp())
 			.put("runes", priced.getBreakdown())
 			.submit();
@@ -3092,12 +3181,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// a stopped session's numbers are locked in at session-end prices
 		if (sessionFinished && frozenView != null)
 		{
-			return frozenView;
+			// list order is a display preference, so it still follows the toggle
+			return frozenView.toBuilder().costsNewestFirst(config.costsNewestFirst()).build();
 		}
 
 		final ProfitLossCalculatorPanel.View.ViewBuilder b = ProfitLossCalculatorPanel.View.builder()
 			.showIncomeList(config.showIncomeList())
 			.showCostList(config.showCostList())
+			.costsNewestFirst(config.costsNewestFirst())
 			.slayerTaskName(slayerTracker.getTaskName() == null ? "" : slayerTracker.getTaskName())
 			.slayerTaskLocation(slayerTracker.getTaskLocation() == null ? "" : slayerTracker.getTaskLocation())
 			.slayerInitialAmount(slayerTracker.getInitialAmount())

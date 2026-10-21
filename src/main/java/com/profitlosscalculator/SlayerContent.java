@@ -52,6 +52,7 @@ class SlayerContent extends JPanel
 	private final JPanel otherPanel = new JPanel();
 	private final JPanel costSection = new JPanel();
 	private final JPanel costPanel = new JPanel();
+	private final JLabel costOrder;
 	private final JPanel deathsSection = new JPanel();
 	private final JPanel deathsPanel = new JPanel();
 
@@ -59,6 +60,7 @@ class SlayerContent extends JPanel
 	{
 		this.controls = controls;
 		this.itemManager = itemManager;
+		this.costOrder = PanelUi.orderToggle(controls::onToggleCostOrder);
 
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(8, 10, 10, 10));
@@ -125,13 +127,13 @@ class SlayerContent extends JPanel
 		content.add(PanelUi.vgap(8));
 
 		killPanel.setLayout(new BoxLayout(killPanel, BoxLayout.Y_AXIS));
-		section(killSection, "Per kill", killPanel);
+		section(killSection, PanelUi.sectionLabel("Per kill"), killPanel);
 		otherPanel.setLayout(new BoxLayout(otherPanel, BoxLayout.Y_AXIS));
-		section(otherSection, "Other income", otherPanel);
+		section(otherSection, PanelUi.sectionLabel("Other income"), otherPanel);
 		costPanel.setLayout(new BoxLayout(costPanel, BoxLayout.Y_AXIS));
-		section(costSection, "Costs", costPanel);
+		section(costSection, PanelUi.sectionHeader("Costs", costOrder), costPanel);
 		deathsPanel.setLayout(new BoxLayout(deathsPanel, BoxLayout.Y_AXIS));
-		section(deathsSection, "Deaths", deathsPanel);
+		section(deathsSection, PanelUi.sectionLabel("Deaths"), deathsPanel);
 		content.add(killSection);
 		content.add(otherSection);
 		content.add(costSection);
@@ -141,11 +143,11 @@ class SlayerContent extends JPanel
 		render(ProfitLossCalculatorPanel.View.builder().build());
 	}
 
-	private static void section(JPanel holder, String title, JPanel body)
+	private static void section(JPanel holder, Component header, JPanel body)
 	{
 		holder.setLayout(new BoxLayout(holder, BoxLayout.Y_AXIS));
 		holder.setAlignmentX(Component.LEFT_ALIGNMENT);
-		holder.add(PanelUi.sectionLabel(title));
+		holder.add(header);
 		holder.add(body);
 		holder.add(PanelUi.vgap(10));
 	}
@@ -215,7 +217,8 @@ class SlayerContent extends JPanel
 		}
 
 		fillLines(otherSection, otherPanel, slayer, view.getIncomeEvents());
-		fillLines(costSection, costPanel, slayer && view.isShowCostList(), view.getCostEvents());
+		costOrder.setText(PanelUi.orderText(view.isCostsNewestFirst()));
+		fillLines(costSection, costPanel, slayer && view.isShowCostList(), PanelUi.ordered(view.getCostEvents(), view.isCostsNewestFirst()));
 
 		deathsSection.setVisible(slayer && !view.getDeaths().isEmpty());
 		deathsPanel.removeAll();

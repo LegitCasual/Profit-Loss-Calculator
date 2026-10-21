@@ -45,6 +45,7 @@ class SessionContent extends JPanel
 	private final JPanel incomePanel = new JPanel();
 	private final JPanel costSection = new JPanel();
 	private final JPanel costPanel = new JPanel();
+	private final JLabel costOrder;
 	private final JPanel deathsSection = new JPanel();
 	private final JPanel deathsPanel = new JPanel();
 
@@ -52,6 +53,7 @@ class SessionContent extends JPanel
 	{
 		this.controls = controls;
 		this.itemManager = itemManager;
+		this.costOrder = PanelUi.orderToggle(controls::onToggleCostOrder);
 
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(8, 10, 10, 10));
@@ -106,11 +108,11 @@ class SessionContent extends JPanel
 		center.add(PanelUi.vgap(8));
 
 		incomePanel.setLayout(new BoxLayout(incomePanel, BoxLayout.Y_AXIS));
-		section(incomeSection, "Income", incomePanel);
+		section(incomeSection, PanelUi.sectionLabel("Income"), incomePanel);
 		costPanel.setLayout(new BoxLayout(costPanel, BoxLayout.Y_AXIS));
-		section(costSection, "Costs", costPanel);
+		section(costSection, PanelUi.sectionHeader("Costs", costOrder), costPanel);
 		deathsPanel.setLayout(new BoxLayout(deathsPanel, BoxLayout.Y_AXIS));
-		section(deathsSection, "Deaths", deathsPanel);
+		section(deathsSection, PanelUi.sectionLabel("Deaths"), deathsPanel);
 
 		center.add(incomeSection);
 		center.add(costSection);
@@ -126,11 +128,11 @@ class SessionContent extends JPanel
 		render(ProfitLossCalculatorPanel.View.builder().build());
 	}
 
-	private static void section(JPanel holder, String title, JPanel body)
+	private static void section(JPanel holder, Component header, JPanel body)
 	{
 		holder.setLayout(new BoxLayout(holder, BoxLayout.Y_AXIS));
 		holder.setAlignmentX(Component.LEFT_ALIGNMENT);
-		holder.add(PanelUi.sectionLabel(title));
+		holder.add(header);
 		holder.add(body);
 		holder.add(PanelUi.vgap(10));
 	}
@@ -190,7 +192,8 @@ class SessionContent extends JPanel
 		}
 
 		fillLines(incomeSection, incomePanel, sessionShowing && view.isShowIncomeList(), view.getIncomeEvents());
-		fillLines(costSection, costPanel, sessionShowing && view.isShowCostList(), view.getCostEvents());
+		costOrder.setText(PanelUi.orderText(view.isCostsNewestFirst()));
+		fillLines(costSection, costPanel, sessionShowing && view.isShowCostList(), PanelUi.ordered(view.getCostEvents(), view.isCostsNewestFirst()));
 
 		deathsSection.setVisible(sessionShowing && !view.getDeaths().isEmpty());
 		deathsPanel.removeAll();

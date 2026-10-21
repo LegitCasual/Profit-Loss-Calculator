@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntUnaryOperator;
+import net.runelite.api.gameval.ItemID;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -100,6 +101,31 @@ public class SpellCostServiceTest
 	}
 
 	@Test
+	public void twinflameFreesWaterOnWaterBlast()
+	{
+		price(Rune.WATER, 5);
+		price(Rune.AIR, 4);
+		price(Rune.DEATH, 200);
+		SpellCostService.Priced p = SpellCostService.price(Spell.WATER_BLAST, Staff.TWINFLAME.getRunes(), ge);
+		// water free; 3 air * 4 + 1 death * 200
+		assertEquals(12 + 200, p.getGp());
+		assertTrue(p.getBreakdown().containsKey("Water (staff)"));
+		assertNull(p.getRunesUsed().get(Rune.WATER));
+	}
+
+	@Test
+	public void twinflameFreesFireOnFireWave()
+	{
+		price(Rune.FIRE, 5);
+		price(Rune.AIR, 4);
+		price(Rune.BLOOD, 300);
+		SpellCostService.Priced p = SpellCostService.price(Spell.FIRE_WAVE, Staff.TWINFLAME.getRunes(), ge);
+		// fire free; 5 air * 4 + 1 blood * 300
+		assertEquals(20 + 300, p.getGp());
+		assertNull(p.getRunesUsed().get(Rune.FIRE));
+	}
+
+	@Test
 	public void bloodBarrageChargesSoulRune()
 	{
 		price(Rune.BLOOD, 300);
@@ -114,8 +140,19 @@ public class SpellCostServiceTest
 	public void staffLookupByItemId()
 	{
 		assertSame(Staff.AIR, Staff.byItemId(Staff.AIR.getItemIds()[0]));
+		assertSame(Staff.TWINFLAME, Staff.byItemId(ItemID.TWINFLAME_STAFF));
+		assertSame(Staff.TOME_OF_EARTH, Staff.byItemId(ItemID.TOME_OF_EARTH));
 		assertNull(Staff.byItemId(995)); // coins
 		assertNull(Staff.byItemId(-1));
+	}
+
+	@Test
+	public void spellLookupByName()
+	{
+		assertSame(Spell.FIRE_BLAST, Spell.byName("Fire Blast"));
+		assertSame(Spell.ICE_BARRAGE, Spell.byName("ice barrage"));
+		assertNull(Spell.byName("Not a spell"));
+		assertNull(Spell.byName(null));
 	}
 
 	@Test
