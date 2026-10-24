@@ -248,6 +248,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private final SlayerTaskTracker slayerTracker = new SlayerTaskTracker();
 
 	private ProfitLossCalculatorPanel panel;
+	/** The History dashboard window, created on first open. Written on the EDT only. */
+	private volatile DashboardWindow dashboard;
 	private NavigationButton navButton;
 
 	/** The session being tracked (running or paused), or the last finished one for the panel. */
@@ -485,6 +487,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		overlayManager.remove(overlay);
 		overlayManager.remove(noSessionOverlay);
 		clientToolbar.removeNavigation(navButton);
+		final DashboardWindow d = dashboard;
+		dashboard = null;
+		if (d != null)
+		{
+			SwingUtilities.invokeLater(d::dispose);
+		}
 		logger.close();
 		history.stop();
 		panel = null;
@@ -502,6 +510,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  passed along so the panel never touches ItemManager for names. */
 	private void pushHistory(SessionHistory.Snapshot lifetime)
 	{
+		if (dashboard != null)
+		{
+			pushDashboard();
+		}
 		clientThread.invoke(() ->
 		{
 			final Map<Integer, String> names = new HashMap<>();
@@ -718,6 +730,36 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	public void onRefreshHistory()
 	{
 		history.load(this::pushHistory);
+	}
+
+	@Override
+	public void onOpenDashboard()
+	{
+		final ProfitLossCalculatorPanel p = panel;
+		if (p == null)
+		{
+			return;
+		}
+		if (dashboard == null)
+		{
+			dashboard = new DashboardWindow(SwingUtilities.getWindowAncestor(p), this::onRefreshHistory);
+		}
+		dashboard.setVisible(true);
+		dashboard.toFront();
+		pushDashboard();
+	}
+
+	/** Hand the open dashboard a fresh copy of every run (read on the history executor). */
+	private void pushDashboard()
+	{
+		history.runs(runs -> SwingUtilities.invokeLater(() ->
+		{
+			final DashboardWindow d = dashboard;
+			if (d != null)
+			{
+				d.setRuns(runs);
+			}
+		}));
 	}
 
 	@Override

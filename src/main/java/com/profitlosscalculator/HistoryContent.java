@@ -129,6 +129,11 @@ class HistoryContent extends JPanel
 		bar.add(tabButton("Money", Tab.MONEY));
 		bar.add(tabButton("Mobs", Tab.MOBS));
 		add(content, bar);
+		add(content, Box.createVerticalStrut(6));
+		final JButton dashboard = new JButton("Open dashboard");
+		dashboard.setFocusPainted(false);
+		dashboard.addActionListener(e -> controls.onOpenDashboard());
+		add(content, PanelUi.stretch(dashboard));
 		add(content, Box.createVerticalStrut(8));
 	}
 

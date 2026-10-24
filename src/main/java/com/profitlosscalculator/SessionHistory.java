@@ -112,6 +112,12 @@ class SessionHistory
 		return snapshot;
 	}
 
+	/** A copy of every recorded run, for the dashboard. {@code cb} runs on the executor thread. */
+	void runs(Consumer<List<RunRecord>> cb)
+	{
+		run(() -> cb.accept(new ArrayList<>(entries)));
+	}
+
 	/** Upgrade old schema lines, migrate legacy files, read history.jsonl, aggregate.
 	 *  {@code cb} runs on the executor thread. */
 	void load(Consumer<Snapshot> cb)

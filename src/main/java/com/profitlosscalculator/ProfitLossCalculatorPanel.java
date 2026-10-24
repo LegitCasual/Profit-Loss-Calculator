@@ -72,6 +72,9 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		/** Re-read history.jsonl from disk and push a fresh snapshot to the History tab. */
 		void onRefreshHistory();
 
+		/** History tab's "Open dashboard" button: show the dashboard window. */
+		void onOpenDashboard();
+
 		/** The first-run screen's Continue button was clicked - persist that it's been seen. */
 		void onWelcomeDismissed();
 
