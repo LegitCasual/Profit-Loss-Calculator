@@ -35,10 +35,10 @@ import net.runelite.client.util.LinkBrowser;
 class WhatsNewContent extends JPanel
 {
 	/** The release these notes belong to - shown on the screen, and what "seen" is keyed on. */
-	static final String VERSION = "0.2";
+	static final String VERSION = "0.3";
 
 	/** Display only. */
-	static final String RELEASE_DATE = "18 Oct 2026";
+	static final String RELEASE_DATE = "25 Oct 2026";
 
 	/** True unless {@code confirmedVersion} (the version last OK'd; blank = never) is this one. */
 	static boolean isUnseen(String confirmedVersion)
@@ -48,14 +48,15 @@ class WhatsNewContent extends JPanel
 
 	/** Player-facing, one short line each - the panel is ~215px wide. */
 	static final List<String> NOTES = Collections.unmodifiableList(Arrays.asList(
-		"<b>Boss adds now count as the boss.</b> Supplies used on Phosani's Husks, Parasites "
-			+ "and Totems go to Phosani's Nightmare, not Husk - and the adds no longer show up "
-			+ "as kills of their own.",
-		"The same fix covers most bosses with adds: Nex, the Nightmare, Abyssal Sire, Kraken, "
-			+ "Zulrah, Vorkath, Scurrius, Jad, Zuk, Grotesque Guardians, the Royal Titans and more.",
-		"A Target Farm or Slayer task aimed at the add itself (a rats task near Scurrius) still "
-			+ "counts it.",
-		"Supply costs logged before this update stay where they were."
+		"<b>New: History dashboard.</b> Hit <b>Open dashboard</b> on the History tab for charts of "
+			+ "your profit over time and your best and worst activities, in a window you can put "
+			+ "on a second screen.",
+		"Pick a date range, and include or leave out combat, skilling and time out of combat.",
+		"<b>Loot</b> shows what your loot is made of, and whether what you sold went for more or "
+			+ "less than it was worth when you looted it.",
+		"<b>Costs</b> shows where your gp goes - deaths, supplies, spells, teleports - and which "
+			+ "activities cost the most.",
+		"gp / hr only shows for runs spent on one activity for now. Full gp / hr is coming."
 	));
 
 	/** Optional sign-off under the notes - {@code null} to leave it out for a release. */

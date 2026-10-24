@@ -336,4 +336,62 @@ public interface ProfitLossCalculatorConfig extends Config
 		hidden = true
 	)
 	void costsNewestFirst(boolean newestFirst);
+
+	// Internal state - the dashboard window's last range / categories / page, so it reopens as left.
+	@ConfigItem(
+		keyName = "dashboardRange",
+		name = "dashboardRange",
+		description = "Internal - the dashboard's last date range",
+		hidden = true
+	)
+	default String dashboardRange()
+	{
+		return "WEEK";
+	}
+
+	@ConfigItem(
+		keyName = "dashboardRange",
+		name = "dashboardRange",
+		description = "Internal - the dashboard's last date range",
+		hidden = true
+	)
+	void dashboardRange(String range);
+
+	@ConfigItem(
+		keyName = "dashboardCategories",
+		name = "dashboardCategories",
+		description = "Internal - the dashboard's included categories, comma separated",
+		hidden = true
+	)
+	default String dashboardCategories()
+	{
+		return "COMBAT,SKILLING,NOT_IN_COMBAT";
+	}
+
+	@ConfigItem(
+		keyName = "dashboardCategories",
+		name = "dashboardCategories",
+		description = "Internal - the dashboard's included categories, comma separated",
+		hidden = true
+	)
+	void dashboardCategories(String categories);
+
+	@ConfigItem(
+		keyName = "dashboardPage",
+		name = "dashboardPage",
+		description = "Internal - the dashboard's last open page",
+		hidden = true
+	)
+	default String dashboardPage()
+	{
+		return "OVERVIEW";
+	}
+
+	@ConfigItem(
+		keyName = "dashboardPage",
+		name = "dashboardPage",
+		description = "Internal - the dashboard's last open page",
+		hidden = true
+	)
+	void dashboardPage(String page);
 }

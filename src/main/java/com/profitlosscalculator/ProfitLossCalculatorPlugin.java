@@ -510,7 +510,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  passed along so the panel never touches ItemManager for names. */
 	private void pushHistory(SessionHistory.Snapshot lifetime)
 	{
-		if (dashboard != null)
+		final DashboardWindow d = dashboard;
+		if (d != null && d.isVisible())
 		{
 			pushDashboard();
 		}
@@ -742,23 +743,55 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		if (dashboard == null)
 		{
-			dashboard = new DashboardWindow(SwingUtilities.getWindowAncestor(p), this::onRefreshHistory);
+			dashboard = new DashboardWindow(SwingUtilities.getWindowAncestor(p), itemManager, config,
+				this::onRefreshHistory);
 		}
-		dashboard.setVisible(true);
-		dashboard.toFront();
+		dashboard.open();
 		pushDashboard();
 	}
 
-	/** Hand the open dashboard a fresh copy of every run (read on the history executor). */
+	/** Hand the dashboard a fresh copy of every run, sale and logged cost (read on the history
+	 *  executor), with item names resolved on the client thread (ItemManager forbids the EDT). */
 	private void pushDashboard()
 	{
-		history.runs(runs -> SwingUtilities.invokeLater(() ->
+		history.dashboard(input -> clientThread.invoke(() ->
 		{
-			final DashboardWindow d = dashboard;
-			if (d != null)
+			final Map<Integer, String> names = new HashMap<>();
+			for (RunRecord r : input.getRuns())
 			{
-				d.setRuns(runs);
+				if (r == null || r.getPerMob() == null)
+				{
+					continue;
+				}
+				for (RunRecord.MobRun mr : r.getPerMob().values())
+				{
+					if (mr != null && mr.getItems() != null)
+					{
+						for (long[] it : mr.getItems())
+						{
+							if (it != null && it.length > 0)
+							{
+								names.computeIfAbsent((int) it[0], this::itemName);
+							}
+						}
+					}
+				}
 			}
+			for (SessionHistory.RealisedEntry re : input.getRealised())
+			{
+				if (re != null)
+				{
+					names.computeIfAbsent(re.getItemId(), this::itemName);
+				}
+			}
+			SwingUtilities.invokeLater(() ->
+			{
+				final DashboardWindow d = dashboard;
+				if (d != null)
+				{
+					d.setData(input, names);
+				}
+			});
 		}));
 	}
 

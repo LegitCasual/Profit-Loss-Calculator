@@ -81,6 +81,8 @@ class SessionHistory
 	/** Last-loaded GE slot state, for the plugin to seed its tracker once. */
 	private volatile Map<Integer, GeSaleTracker.SlotState> geSlots = new HashMap<>();
 	private volatile Snapshot snapshot = Snapshot.EMPTY;
+	/** Parsed cost lines per session log, for the dashboard. Touched only on the executor thread. */
+	private final Map<Path, CachedLog> costLogCache = new HashMap<>();
 
 	@Inject
 	SessionHistory(Gson gson)
@@ -112,10 +114,122 @@ class SessionHistory
 		return snapshot;
 	}
 
-	/** A copy of every recorded run, for the dashboard. {@code cb} runs on the executor thread. */
-	void runs(Consumer<List<RunRecord>> cb)
+	/** Copies of every recorded run and sale, plus every cost line from the session logs, for
+	 *  the dashboard. {@code cb} runs on the executor thread. */
+	void dashboard(Consumer<DashboardStats.Input> cb)
 	{
-		run(() -> cb.accept(new ArrayList<>(entries)));
+		run(() ->
+		{
+			List<CostLine> costs;
+			try
+			{
+				costs = readCostLines();
+			}
+			catch (IOException e)
+			{
+				log.warn("could not read session logs for the dashboard", e);
+				costs = new ArrayList<>();
+			}
+			cb.accept(new DashboardStats.Input(new ArrayList<>(entries), new ArrayList<>(realised), costs));
+		});
+	}
+
+	/** Every cost line across the {@code session-*.jsonl} logs whose session made it into
+	 *  history - a log left behind by a session that never stopped (client killed) has no run, so
+	 *  counting it would put the cost views out of step with every other figure. A file is only
+	 *  re-parsed when its size or modified time has changed since the last read. */
+	private List<CostLine> readCostLines() throws IOException
+	{
+		final Set<String> runStarts = new HashSet<>();
+		for (RunRecord rr : entries)
+		{
+			if (rr != null && rr.getStart() != null)
+			{
+				runStarts.add(rr.getStart());
+			}
+		}
+		final List<Path> logs;
+		try (Stream<Path> s = Files.list(dir()))
+		{
+			logs = s.filter(p ->
+			{
+				final String n = p.getFileName().toString();
+				return n.startsWith("session-") && n.endsWith(".jsonl");
+			}).collect(Collectors.toList());
+		}
+		final List<CostLine> out = new ArrayList<>();
+		final Map<Path, CachedLog> next = new HashMap<>();
+		for (Path p : logs)
+		{
+			final long size = Files.size(p);
+			final long modified = Files.getLastModifiedTime(p).toMillis();
+			CachedLog c = costLogCache.get(p);
+			if (c == null || c.size != size || c.modified != modified)
+			{
+				String start = null;
+				final List<CostLine> lines = new ArrayList<>();
+				for (String line : Files.readAllLines(p, StandardCharsets.UTF_8))
+				{
+					final JsonObject o = asObject(line);
+					if (start == null && "session_start".equals(str(o, "event")))
+					{
+						start = str(o, "startedAt");
+					}
+					final CostLine cl = costLine(o);
+					if (cl != null)
+					{
+						lines.add(cl);
+					}
+				}
+				c = new CachedLog(size, modified, start, lines);
+			}
+			next.put(p, c);
+			if (c.start != null && runStarts.contains(c.start))
+			{
+				out.addAll(c.lines);
+			}
+		}
+		costLogCache.clear();
+		costLogCache.putAll(next);
+		return out;
+	}
+
+	/** One session-log line -&gt; a cost line, or null when it isn't a gp outlay. Ammo and
+	 *  weapon charges are not logged per event, so they never appear here. */
+	static CostLine costLine(JsonObject o)
+	{
+		final String ev = str(o, "event");
+		if (ev == null)
+		{
+			return null;
+		}
+		final String at = str(o, "ts");
+		final CostLine cl;
+		switch (ev)
+		{
+			case "consumable":
+				cl = new CostLine(at, DashboardStats.CostType.SUPPLIES, str(o, "item"), lng(o, "gp"),
+					Math.max(1, lng(o, "qty")));
+				break;
+			case "spell_cast":
+				cl = new CostLine(at, DashboardStats.CostType.SPELLS, str(o, "spell"), lng(o, "gp"), 1);
+				break;
+			case "teleport":
+				cl = new CostLine(at, DashboardStats.CostType.TELEPORTS, str(o, "item"), lng(o, "gp"),
+					Math.max(1, lng(o, "qty")));
+				break;
+			case "death_resolved":
+				cl = new CostLine(at, DashboardStats.CostType.DEATHS, "Deaths", lng(o, "gp"), 1);
+				break;
+			case "skilling":
+				final String skill = str(o, "skill");
+				cl = new CostLine(at, DashboardStats.CostType.SKILLING,
+					(skill == null ? "Skilling" : skill) + " materials", lng(o, "materialGp"), 1);
+				break;
+			default:
+				return null;
+		}
+		return cl.getGp() > 0 ? cl : null;
 	}
 
 	/** Upgrade old schema lines, migrate legacy files, read history.jsonl, aggregate.
@@ -1255,6 +1369,37 @@ class SessionHistory
 		/** frozen projected unit value of the item in that run. */
 		long unit;
 		String at;
+	}
+
+	/** One gp outlay read back from a session log, for the dashboard's cost views. */
+	@Value
+	static class CostLine
+	{
+		/** ISO instant of the event. */
+		String at;
+		DashboardStats.CostType type;
+		/** item / spell / teleport name, "Deaths", or "&lt;Skill&gt; materials". */
+		String label;
+		long gp;
+		/** units used (a consumable's qty), else 1 per event. */
+		long count;
+	}
+
+	private static final class CachedLog
+	{
+		private final long size;
+		private final long modified;
+		/** the log's {@code session_start.startedAt} - matches its run's start in history. */
+		private final String start;
+		private final List<CostLine> lines;
+
+		private CachedLog(long size, long modified, String start, List<CostLine> lines)
+		{
+			this.size = size;
+			this.modified = modified;
+			this.start = start;
+			this.lines = lines;
+		}
 	}
 
 	/** One GE sale / alch, for the History "GE Sales" view. */

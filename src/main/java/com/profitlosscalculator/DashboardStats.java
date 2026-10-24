@@ -11,6 +11,8 @@ import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +61,30 @@ final class DashboardStats
 		private final String label;
 	}
 
+	@Getter
+	@RequiredArgsConstructor
+	enum CostType
+	{
+		SUPPLIES("Supplies"),
+		SPELLS("Spells"),
+		TELEPORTS("Teleports"),
+		DEATHS("Deaths"),
+		SKILLING("Skilling materials"),
+		/** run cost the session logs don't itemise - ammo, weapon charges, unlogged sessions. */
+		OTHER("Ammo, charges & other");
+
+		private final String label;
+	}
+
+	/** Everything the dashboard reads, copied off the history executor. */
+	@Value
+	static class Input
+	{
+		List<RunRecord> runs;
+		List<SessionHistory.RealisedEntry> realised;
+		List<SessionHistory.CostLine> costs;
+	}
+
 	/** Skilling income / material cost is booked under the skill's name (see
 	 *  {@code reconcileSkilling}), so a perMob key that is a tracked skill's name is skilling. */
 	private static final Set<String> SKILL_NAMES = new HashSet<>();
@@ -84,23 +110,24 @@ final class DashboardStats
 		return SKILL_NAMES.contains(name) ? Category.SKILLING : Category.COMBAT;
 	}
 
-	static Result compute(List<RunRecord> runs, Range range, Set<Category> categories, Instant now, ZoneId zone)
+	static Result compute(Input in, Range range, Set<Category> categories, Instant now, ZoneId zone)
 	{
 		final Instant from = range.getDays() > 0 ? now.minus(Duration.ofDays(range.getDays())) : null;
 		final Map<String, ActivityAcc> acts = new LinkedHashMap<>();
 		final Map<LocalDate, Long> netByDay = new LinkedHashMap<>();
+		final Map<Integer, long[]> lootByItem = new HashMap<>();   // id -> {qty, gp}
 		LocalDate firstDay = null;
 		int runCount = 0;
 		long trackedSec = 0;
 
-		for (RunRecord r : runs)
+		for (RunRecord r : in.getRuns())
 		{
 			if (r == null || r.getPerMob() == null)
 			{
 				continue;
 			}
 			final Instant start = parse(r.getStart());
-			if (start == null || (from != null && start.isBefore(from)) || start.isAfter(now))
+			if (!inRange(start, from, now))
 			{
 				continue;
 			}
@@ -114,7 +141,9 @@ final class DashboardStats
 			{
 				final RunRecord.MobRun mr = e.getValue();
 				final String name = e.getKey() == null ? SessionHistory.UNATTRIBUTED : e.getKey();
-				if (mr == null || !categories.contains(categoryOf(name)))
+				// a skill whose XP ticked with no item change books an all-zero row - nothing to show
+				if (mr == null || !categories.contains(categoryOf(name))
+					|| (mr.getKills() == 0 && mr.getGained() == 0 && mr.getCost() == 0))
 				{
 					continue;
 				}
@@ -124,6 +153,18 @@ final class DashboardStats
 				a.kills += mr.getKills();
 				a.gained += mr.getGained();
 				a.cost += mr.getCost();
+				if (mr.getItems() != null)
+				{
+					for (long[] it : mr.getItems())
+					{
+						if (it != null && it.length >= 3 && it[1] > 0)
+						{
+							final long[] agg = lootByItem.computeIfAbsent((int) it[0], k -> new long[2]);
+							agg[0] += it[1];
+							agg[1] += it[2];
+						}
+					}
+				}
 				if (name.equals(solo))
 				{
 					a.timedSec += r.getDurationSec();
@@ -163,10 +204,88 @@ final class DashboardStats
 		}
 		list.sort(Comparator.comparingLong(Activity::getNet).reversed());
 
+		final List<ItemTotal> loot = new ArrayList<>();
+		lootByItem.forEach((id, v) -> loot.add(new ItemTotal(id, v[0], v[1])));
+		loot.sort(Comparator.comparingLong(ItemTotal::getGp).reversed());
+
 		final LocalDate today = now.atZone(zone).toLocalDate();
 		final LocalDate seriesStart = from != null ? from.atZone(zone).toLocalDate() : firstDay;
 		return new Result(runCount, gained - cost, gained, cost, kills, trackedSec,
-			buckets(netByDay, seriesStart, today), list);
+			buckets(netByDay, seriesStart, today), list, loot,
+			drift(in.getRealised(), from, now, categories),
+			costs(in.getCosts(), from, now, categories, cost));
+	}
+
+	/** Sales in range whose loot came from an included activity, grouped by item. */
+	private static List<Drift> drift(List<SessionHistory.RealisedEntry> realised, Instant from, Instant now,
+		Set<Category> categories)
+	{
+		final Map<Integer, long[]> byItem = new LinkedHashMap<>();   // id -> {qty, projected, net, tax}
+		for (SessionHistory.RealisedEntry re : realised)
+		{
+			if (re == null || !inRange(parse(re.getSoldAt()), from, now) || !categories.contains(categoryOf(re.getMob())))
+			{
+				continue;
+			}
+			final long[] a = byItem.computeIfAbsent(re.getItemId(), k -> new long[4]);
+			a[0] += re.getQty();
+			a[1] += re.getProjected();
+			a[2] += re.getNet();
+			a[3] += re.getTax();
+		}
+		final List<Drift> out = new ArrayList<>();
+		byItem.forEach((id, a) -> out.add(new Drift(id, a[0], a[1], a[2], a[3])));
+		out.sort((x, y) -> Long.compare(Math.abs(y.drift()), Math.abs(x.drift())));
+		return out;
+	}
+
+	/**
+	 * Logged cost lines in range, by type and by label. Skilling materials follow the Skilling
+	 * filter; every other line follows Combat / Not in combat (the logs don't say which mob).
+	 * When every category is included, run cost the logs don't account for (ammo, charges,
+	 * sessions with no log) is shown as {@link CostType#OTHER}.
+	 */
+	private static Costs costs(List<SessionHistory.CostLine> lines, Instant from, Instant now,
+		Set<Category> categories, long runCost)
+	{
+		final boolean combat = categories.contains(Category.COMBAT) || categories.contains(Category.NOT_IN_COMBAT);
+		final Map<CostType, Long> byType = new LinkedHashMap<>();
+		final Map<String, CostItem> byLabel = new LinkedHashMap<>();
+		long logged = 0;
+		for (SessionHistory.CostLine cl : lines)
+		{
+			if (cl == null || cl.getType() == null || !inRange(parse(cl.getAt()), from, now))
+			{
+				continue;
+			}
+			final boolean skilling = cl.getType() == CostType.SKILLING;
+			if (skilling ? !categories.contains(Category.SKILLING) : !combat)
+			{
+				continue;
+			}
+			logged += cl.getGp();
+			byType.merge(cl.getType(), cl.getGp(), Long::sum);
+			final String label = cl.getLabel() == null ? cl.getType().getLabel() : cl.getLabel();
+			final CostItem prev = byLabel.get(label);
+			byLabel.put(label, new CostItem(label, cl.getType(),
+				(prev == null ? 0 : prev.getGp()) + cl.getGp(), (prev == null ? 0 : prev.getCount()) + cl.getCount()));
+		}
+		if (categories.containsAll(EnumSet.allOf(Category.class)) && runCost > logged)
+		{
+			byType.put(CostType.OTHER, runCost - logged);
+		}
+
+		final List<TypeTotal> types = new ArrayList<>();
+		byType.forEach((t, gp) -> types.add(new TypeTotal(t, gp)));
+		types.sort(Comparator.comparingLong(TypeTotal::getGp).reversed());
+		final List<CostItem> items = new ArrayList<>(byLabel.values());
+		items.sort(Comparator.comparingLong(CostItem::getGp).reversed());
+		return new Costs(types, items);
+	}
+
+	private static boolean inRange(Instant t, Instant from, Instant now)
+	{
+		return t != null && (from == null || !t.isBefore(from)) && !t.isAfter(now);
 	}
 
 	/** The one non-idle activity in a run, or null when there were several (or none). */
@@ -248,14 +367,20 @@ final class DashboardStats
 		List<Bucket> buckets;
 		/** net descending. */
 		List<Activity> activities;
+		/** looted items from included activities, gp descending. */
+		List<ItemTotal> loot;
+		/** sold / alched items, biggest drift (either way) first. */
+		List<Drift> drift;
+		Costs costs;
 
-		/** The best gp/hr among activities with at least {@code minSec} of timed runs. */
+		/** The best gp/hr among activities with at least {@code minSec} of timed runs, or null
+		 *  when none of them is making money - the least-bad loss isn't a "best". */
 		Activity bestPerHour(long minSec)
 		{
 			Activity best = null;
 			for (Activity a : activities)
 			{
-				if (a.getTimedSec() >= minSec && a.getCategory() != Category.NOT_IN_COMBAT
+				if (a.getTimedSec() >= minSec && a.getCategory() != Category.NOT_IN_COMBAT && a.gpPerHour() > 0
 					&& (best == null || a.gpPerHour() > best.gpPerHour()))
 				{
 					best = a;
@@ -263,6 +388,59 @@ final class DashboardStats
 			}
 			return best;
 		}
+	}
+
+	@Value
+	static class ItemTotal
+	{
+		int itemId;
+		long qty;
+		/** value frozen at each run's end. */
+		long gp;
+	}
+
+	/** What an item actually sold (or alched) for against what it was valued at when looted. */
+	@Value
+	static class Drift
+	{
+		int itemId;
+		long qty;
+		/** value at loot time (frozen at run end). */
+		long projected;
+		/** received, after GE tax. */
+		long net;
+		long tax;
+
+		long drift()
+		{
+			return net - projected;
+		}
+	}
+
+	@Value
+	static class Costs
+	{
+		/** gp descending. */
+		List<TypeTotal> types;
+		/** per item / spell / teleport label, gp descending. */
+		List<CostItem> items;
+	}
+
+	@Value
+	static class TypeTotal
+	{
+		CostType type;
+		long gp;
+	}
+
+	@Value
+	static class CostItem
+	{
+		String label;
+		CostType type;
+		long gp;
+		/** units used / casts / events. */
+		long count;
 	}
 
 	@Value

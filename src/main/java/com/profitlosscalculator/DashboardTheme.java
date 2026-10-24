@@ -5,6 +5,7 @@
 package com.profitlosscalculator;
 
 import java.awt.BasicStroke;
+import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Dimension;
@@ -14,6 +15,7 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GraphicsEnvironment;
 import java.awt.LayoutManager;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -25,8 +27,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import javax.swing.BorderFactory;
+import javax.swing.JButton;
 import javax.swing.JComponent;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.plaf.basic.BasicScrollBarUI;
 
 /**
  * The {@link DashboardWindow}'s own look - a softer dark palette and the system UI font rather
@@ -140,6 +145,159 @@ final class DashboardTheme
 		protected void paintComponent(Graphics g)
 		{
 			paintCard(g, this);
+		}
+	}
+
+	/** A headline-number card: a small caps label, a big value, a muted line under it. */
+	static final class Stat extends Card
+	{
+		private final JLabel value = new JLabel("—");
+		private final JLabel sub = new JLabel(" ");
+
+		Stat(String label)
+		{
+			super(new BorderLayout(0, 4));
+			setBorder(BorderFactory.createEmptyBorder(14, 16, 14, 16));
+			final JLabel name = new JLabel(label.toUpperCase());
+			name.setFont(caps(10.5f));
+			name.setForeground(MUTED);
+			value.setFont(font(Font.BOLD, 24f));
+			sub.setFont(font(Font.PLAIN, 12f));
+			sub.setForeground(MUTED);
+			add(name, BorderLayout.NORTH);
+			add(value, BorderLayout.CENTER);
+			add(sub, BorderLayout.SOUTH);
+		}
+
+		void set(String text, Color color, String subText)
+		{
+			value.setText(text);
+			value.setForeground(color);
+			sub.setText(subText == null || subText.isEmpty() ? " " : subText);
+		}
+	}
+
+	/** A page tab: larger text, white with an accent underline when selected. */
+	static final class Tab extends JComponent
+	{
+		private final String text;
+		private boolean on;
+		private boolean hover;
+
+		Tab(String text, boolean on, Runnable onClick)
+		{
+			this.text = text;
+			this.on = on;
+			setFont(font(Font.BOLD, 15f));
+			setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			addMouseListener(new MouseAdapter()
+			{
+				@Override
+				public void mouseClicked(MouseEvent e)
+				{
+					onClick.run();
+				}
+
+				@Override
+				public void mouseEntered(MouseEvent e)
+				{
+					hover = true;
+					repaint();
+				}
+
+				@Override
+				public void mouseExited(MouseEvent e)
+				{
+					hover = false;
+					repaint();
+				}
+			});
+		}
+
+		void setOn(boolean on)
+		{
+			this.on = on;
+			repaint();
+		}
+
+		@Override
+		public Dimension getPreferredSize()
+		{
+			final FontMetrics fm = getFontMetrics(getFont());
+			return new Dimension(fm.stringWidth(text) + 4, fm.getHeight() + 12);
+		}
+
+		@Override
+		protected void paintComponent(Graphics g0)
+		{
+			final Graphics2D g = smooth(g0);
+			try
+			{
+				g.setFont(getFont());
+				final FontMetrics fm = g.getFontMetrics();
+				g.setColor(on ? TEXT : hover ? new Color(0xb8, 0xbd, 0xc6) : MUTED);
+				g.drawString(text, 2, fm.getAscent() + 2);
+				if (on)
+				{
+					g.setColor(ACCENT);
+					g.fill(new RoundRectangle2D.Float(2, getHeight() - 3f, fm.stringWidth(text), 3f, 3f, 3f));
+				}
+			}
+			finally
+			{
+				g.dispose();
+			}
+		}
+	}
+
+	/** A slim scrollbar: no arrow buttons, no track, a rounded thumb that brightens on hover. */
+	static final class SlimScrollBarUI extends BasicScrollBarUI
+	{
+		@Override
+		protected JButton createDecreaseButton(int orientation)
+		{
+			return zeroButton();
+		}
+
+		@Override
+		protected JButton createIncreaseButton(int orientation)
+		{
+			return zeroButton();
+		}
+
+		private static JButton zeroButton()
+		{
+			final JButton b = new JButton();
+			b.setPreferredSize(new Dimension(0, 0));
+			b.setMinimumSize(new Dimension(0, 0));
+			b.setMaximumSize(new Dimension(0, 0));
+			return b;
+		}
+
+		@Override
+		protected void paintTrack(Graphics g, JComponent c, Rectangle r)
+		{
+		}
+
+		@Override
+		protected void paintThumb(Graphics g0, JComponent c, Rectangle r)
+		{
+			if (r.isEmpty() || !scrollbar.isEnabled())
+			{
+				return;
+			}
+			final Graphics2D g = smooth(g0);
+			try
+			{
+				g.setColor(isThumbRollover() || isDragging ? MUTED : BORDER);
+				final float w = r.width - 4f;
+				final float h = r.height - 4f;
+				g.fill(new RoundRectangle2D.Float(r.x + 2f, r.y + 2f, w, h, Math.min(w, h), Math.min(w, h)));
+			}
+			finally
+			{
+				g.dispose();
+			}
 		}
 	}
 

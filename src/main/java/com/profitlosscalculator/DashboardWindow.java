@@ -5,12 +5,14 @@
 package com.profitlosscalculator;
 
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.Image;
 import java.awt.Window;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -18,11 +20,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import javax.swing.BorderFactory;
-import javax.swing.JDialog;
+import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -34,32 +38,61 @@ import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.JTableHeader;
 import javax.swing.table.TableRowSorter;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.util.AsyncBufferedImage;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.QuantityFormatter;
 
 /**
- * The History dashboard: a separate, non-modal window over the client with a date-range and
- * category filter, headline tiles, two charts and a sortable per-activity table. Fed a copy of
- * every {@link RunRecord} via {@link #setRuns}; all filtering is {@link DashboardStats}, all
- * styling {@link DashboardTheme}.
+ * The History dashboard: a separate, non-modal window over the client. A date-range and
+ * category filter and headline tiles sit above three pages - Overview (net over time, top
+ * activities, a sortable per-activity table), Loot (what the loot is made of, and how sold
+ * loot's price drifted) and Costs (where the gp went, by type and by item). Fed via
+ * {@link #setData}; all filtering is {@link DashboardStats}, all styling {@link DashboardTheme}.
  *
  * <p>EDT only.
  */
-class DashboardWindow extends JDialog
+class DashboardWindow extends JFrame
 {
 	/** An activity needs this much timed play before it can be crowned best gp/hr. */
 	private static final long BEST_MIN_SEC = 30 * 60;
+	private static final int LIST_ROWS = 15;
 
+	private final ItemManager itemManager;
+	/** Remembers range / categories / page between opens (hidden keys). */
+	private final ProfitLossCalculatorConfig config;
 	private final Runnable onRefresh;
 
-	private List<RunRecord> runs = Collections.emptyList();
+	private DashboardStats.Input input = new DashboardStats.Input(
+		Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+	private Map<Integer, String> names = Collections.emptyMap();
+	private final Map<Integer, AsyncBufferedImage> icons = new HashMap<>();
 	private DashboardStats.Range range = DashboardStats.Range.WEEK;
 	private final Set<DashboardStats.Category> categories = EnumSet.allOf(DashboardStats.Category.class);
 
 	private final Map<DashboardStats.Range, DashboardTheme.Chip> rangeChips = new EnumMap<>(DashboardStats.Range.class);
-	private final Map<Tile, JLabel[]> tiles = new EnumMap<>(Tile.class);
+	private final Map<Page, DashboardTheme.Tab> tabs = new EnumMap<>(Page.class);
+	private final Map<Tile, DashboardTheme.Stat> tiles = new EnumMap<>(Tile.class);
+	private final DashboardTheme.Stat lootedStat = new DashboardTheme.Stat("Looted · estimated value");
+	private final DashboardTheme.Stat soldStat = new DashboardTheme.Stat("Sold & alched · money received");
+	private final CardLayout pages = new CardLayout();
+	private final JPanel pageHolder = new JPanel(pages);
+	private final JLabel footnote = new JLabel();
+
 	private final DashboardCharts.NetOverTime netChart = new DashboardCharts.NetOverTime();
-	private final DashboardCharts.TopActivities topChart = new DashboardCharts.TopActivities();
+	private final DashboardCharts.BarList topChart =
+		new DashboardCharts.BarList("Top activities by net", 10, "Nothing recorded in this range");
 	private final ActivityModel model = new ActivityModel();
+	private final DashboardCharts.BarList lootChart =
+		new DashboardCharts.BarList("Loot by estimated value", LIST_ROWS, "No loot in this range");
+	private final DashboardCharts.BarList driftChart =
+		new DashboardCharts.BarList("Price drift on sold loot", LIST_ROWS, "Nothing sold or alched in this range");
+	private final DashboardCharts.StackedBar costTypeChart =
+		new DashboardCharts.StackedBar("Cost by type", "No costs in this range");
+	private final DashboardCharts.BarList costActivityChart =
+		new DashboardCharts.BarList("Cost by activity", LIST_ROWS, "No costs in this range");
+	private final DashboardCharts.BarList costItemChart =
+		new DashboardCharts.BarList("Biggest costs", LIST_ROWS, "No supplies, spells or teleports in this range");
 
 	private enum Tile
 	{
@@ -73,59 +106,137 @@ class DashboardWindow extends JDialog
 		}
 	}
 
-	DashboardWindow(Window owner, Runnable onRefresh)
+	private enum Page
 	{
-		super(owner, "Profit Loss Dashboard", ModalityType.MODELESS);
+		OVERVIEW("Overview", "gp / hr only counts runs where that activity was the only one - mixed sessions have "
+			+ "no per-activity time yet. Best gp / hr needs " + (BEST_MIN_SEC / 60) + "+ min of timed runs."),
+		LOOT("Loot", "Looted value is an estimate - the GE price of what you picked up, frozen at each run's end. "
+			+ "Price drift compares what sold or alched loot actually brought in (after GE tax) with that estimate."),
+		COSTS("Costs", "From the session logs. Ammo and weapon charges aren't logged one by one - they show as "
+			+ "\"Ammo, charges & other\" when every category is included.");
+
+		private final String label;
+		private final String note;
+
+		Page(String label, String note)
+		{
+			this.label = label;
+			this.note = note;
+		}
+	}
+
+	/**
+	 * @param client the RuneLite window - only used to place this one over it on first open; the
+	 *               dashboard is its own top-level frame (own taskbar entry, can sit behind the
+	 *               game), not a dialog owned by the client
+	 */
+	DashboardWindow(Window client, ItemManager itemManager, ProfitLossCalculatorConfig config, Runnable onRefresh)
+	{
+		super("Profit Loss Dashboard");
+		this.itemManager = itemManager;
+		this.config = config;
 		this.onRefresh = onRefresh;
 		setDefaultCloseOperation(HIDE_ON_CLOSE);
+		setIconImage(ImageUtil.loadImageResource(ProfitLossCalculatorPlugin.class, "panel_icon.png"));
+
+		range = parse(DashboardStats.Range.class, config.dashboardRange(), DashboardStats.Range.WEEK);
+		categories.clear();
+		for (String c : config.dashboardCategories().split(","))
+		{
+			final DashboardStats.Category cat = parse(DashboardStats.Category.class, c.trim(), null);
+			if (cat != null)
+			{
+				categories.add(cat);
+			}
+		}
+		final Page page = parse(Page.class, config.dashboardPage(), Page.OVERVIEW);
 
 		final JPanel root = new JPanel(new BorderLayout(0, 12));
 		root.setBackground(DashboardTheme.BG);
-		root.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
+		root.setBorder(BorderFactory.createEmptyBorder(12, 16, 16, 16));
 
 		final JPanel top = new JPanel(new BorderLayout(0, 12));
 		top.setOpaque(false);
-		top.add(filterBar(), BorderLayout.NORTH);
-		top.add(tileRow(), BorderLayout.CENTER);
-		final JPanel charts = new JPanel(new GridLayout(1, 2, 12, 0));
-		charts.setOpaque(false);
-		charts.add(netChart);
-		charts.add(topChart);
-		top.add(charts, BorderLayout.SOUTH);
+		top.add(tabRow(), BorderLayout.NORTH);
+		final JPanel filtersAndTiles = new JPanel(new BorderLayout(0, 12));
+		filtersAndTiles.setOpaque(false);
+		filtersAndTiles.add(filterBar(), BorderLayout.NORTH);
+		filtersAndTiles.add(tileRow(), BorderLayout.CENTER);
+		top.add(filtersAndTiles, BorderLayout.CENTER);
 		root.add(top, BorderLayout.NORTH);
 
-		root.add(table(), BorderLayout.CENTER);
+		pageHolder.setOpaque(false);
+		pageHolder.add(overviewPage(), Page.OVERVIEW.name());
+		pageHolder.add(pair(column(lootedStat, lootChart), column(soldStat, driftChart)), Page.LOOT.name());
+		pageHolder.add(column(costTypeChart, pair(costActivityChart, costItemChart)), Page.COSTS.name());
+		root.add(pageHolder, BorderLayout.CENTER);
 
-		final JLabel footnote = new JLabel("gp / hr only counts runs where that activity was the only one - "
-			+ "mixed sessions have no per-activity time yet. Best gp / hr needs " + (BEST_MIN_SEC / 60)
-			+ "+ min of timed runs.");
 		footnote.setFont(DashboardTheme.font(Font.PLAIN, 11.5f));
 		footnote.setForeground(DashboardTheme.MUTED);
 		root.add(footnote, BorderLayout.SOUTH);
 
 		setContentPane(root);
 		setMinimumSize(new Dimension(860, 640));
-		setSize(1120, 800);
-		setLocationRelativeTo(owner);
+		setSize(1120, 880);
+		setLocationRelativeTo(client);
+		showPage(page);
 		recompute();
 	}
 
-	void setRuns(List<RunRecord> runs)
+	/** Bring the window up - restored if minimised - and to the front. */
+	void open()
 	{
-		this.runs = runs == null ? Collections.emptyList() : runs;
+		if ((getExtendedState() & ICONIFIED) != 0)
+		{
+			setExtendedState(getExtendedState() & ~ICONIFIED);
+		}
+		setVisible(true);
+		toFront();
+		requestFocus();
+	}
+
+	/** A saved enum name back to its constant, or {@code fallback} if it's blank or unknown. */
+	private static <E extends Enum<E>> E parse(Class<E> type, String name, E fallback)
+	{
+		try
+		{
+			return name == null || name.isEmpty() ? fallback : Enum.valueOf(type, name);
+		}
+		catch (IllegalArgumentException ex)
+		{
+			return fallback;
+		}
+	}
+
+	private void saveCategories()
+	{
+		final StringBuilder sb = new StringBuilder();
+		for (DashboardStats.Category c : categories)
+		{
+			sb.append(sb.length() == 0 ? "" : ",").append(c.name());
+		}
+		config.dashboardCategories(sb.toString());
+	}
+
+	/** Fresh data from the history executor, with item names resolved on the client thread. */
+	void setData(DashboardStats.Input input, Map<Integer, String> names)
+	{
+		this.input = input;
+		this.names = names == null ? Collections.emptyMap() : names;
 		recompute();
 	}
 
 	private void recompute()
 	{
-		final DashboardStats.Result r = DashboardStats.compute(runs, range, categories, Instant.now(), ZoneId.systemDefault());
+		final DashboardStats.Result r = DashboardStats.compute(input, range, categories, Instant.now(), ZoneId.systemDefault());
 
 		setTile(Tile.NET, PanelUi.sign(r.getNet()), signColor(r.getNet()),
 			PanelUi.gpPlain(r.getGained()) + " gained");
 		final DashboardStats.Activity best = r.bestPerHour(BEST_MIN_SEC);
 		if (best == null)
 		{
-			setTile(Tile.PER_HOUR, "—", DashboardTheme.MUTED, "Needs " + (BEST_MIN_SEC / 60) + "+ min on one activity");
+			setTile(Tile.PER_HOUR, "—", DashboardTheme.MUTED,
+				"No profitable activity with " + (BEST_MIN_SEC / 60) + "+ min timed");
 		}
 		else
 		{
@@ -139,8 +250,228 @@ class DashboardWindow extends JDialog
 			r.getGained() > 0 ? (r.getCost() * 100 / r.getGained()) + "% of loot value" : " ");
 
 		netChart.setData(r.getBuckets());
-		topChart.setData(r.getActivities());
+		topChart.setData(activityBars(r.getActivities()), null);
 		model.setRows(r.getActivities());
+		lootBars(r.getLoot());
+		driftBars(r.getDrift());
+		costBars(r.getCosts());
+		costActivityBars(r.getActivities());
+	}
+
+	/** Run cost per activity, from history - the session logs can't say which mob a cost was for. */
+	private void costActivityBars(List<DashboardStats.Activity> activities)
+	{
+		final List<DashboardStats.Activity> sorted = new ArrayList<>();
+		long total = 0;
+		for (DashboardStats.Activity a : activities)
+		{
+			if (a.getCost() > 0)
+			{
+				sorted.add(a);
+				total += a.getCost();
+			}
+		}
+		sorted.sort((a, b) -> Long.compare(b.getCost(), a.getCost()));
+		final List<DashboardCharts.Bar> bars = new ArrayList<>();
+		for (DashboardStats.Activity a : sorted)
+		{
+			final String name = a.getName().isEmpty() ? DashboardStats.Category.NOT_IN_COMBAT.getLabel() : a.getName();
+			bars.add(new DashboardCharts.Bar(name, a.getCost(), PanelUi.gpPlain(a.getCost()), DashboardTheme.LOSS,
+				"<b>" + PanelUi.escape(name) + "</b>"
+					+ "<br>Cost " + PanelUi.gp(a.getCost()) + " · " + pct(a.getCost(), total) + " of cost"
+					+ "<br>" + a.getRuns() + (a.getRuns() == 1 ? " run" : " runs")
+					+ (a.getKills() > 0 ? " · " + PanelUi.gp(a.getCost() / a.getKills()) + " per kill" : "")
+					+ "<br>Gained " + PanelUi.gp(a.getGained()) + " · net " + PanelUi.sign(a.getNet()),
+				null));
+		}
+		costActivityChart.setData(bars, total > 0 ? "Total " + PanelUi.gpPlain(total) : null);
+	}
+
+	// ------------------------------------------------------------------ chart rows
+
+	private List<DashboardCharts.Bar> activityBars(List<DashboardStats.Activity> activities)
+	{
+		final List<DashboardStats.Activity> sorted = new ArrayList<>(activities);
+		// biggest magnitude first, so a heavy loss still shows next to the best earners
+		sorted.sort((a, b) -> Long.compare(Math.abs(b.getNet()), Math.abs(a.getNet())));
+		final List<DashboardCharts.Bar> bars = new ArrayList<>();
+		for (DashboardStats.Activity a : sorted)
+		{
+			if (a.getNet() == 0)
+			{
+				continue; // kills with no loot or cost - a bar of nothing (still listed in the table)
+			}
+			final String name = a.getName().isEmpty() ? DashboardStats.Category.NOT_IN_COMBAT.getLabel() : a.getName();
+			bars.add(new DashboardCharts.Bar(name, a.getNet(), PanelUi.sign(a.getNet()), signColor(a.getNet()),
+				"<b>" + PanelUi.escape(name) + "</b>"
+					+ "<br>Gained " + PanelUi.gp(a.getGained())
+					+ "<br>Cost " + PanelUi.gp(a.getCost())
+					+ (a.getKills() > 0 ? "<br>" + a.getKills() + " kills · " + PanelUi.sign(a.gpPerKill()) + " each" : "")
+					+ (a.hasRate() ? "<br>" + PanelUi.sign(a.gpPerHour()) + " gp/hr" : ""),
+				null));
+		}
+		return bars;
+	}
+
+	private void lootBars(List<DashboardStats.ItemTotal> loot)
+	{
+		long total = 0;
+		long coins = 0;
+		long units = 0;
+		for (DashboardStats.ItemTotal it : loot)
+		{
+			total += it.getGp();
+			if (isCoins(it.getItemId()))
+			{
+				coins += it.getGp();
+			}
+			else
+			{
+				units += it.getQty();
+			}
+		}
+		lootedStat.set(total > 0 ? "≈ " + PanelUi.gpPlain(total) : "—", DashboardTheme.TEXT, total > 0
+			? QuantityFormatter.formatNumber(units) + " items" + (coins > 0 ? " + " + PanelUi.gpPlain(coins) + " coins" : "")
+				+ "  ·  GE value when looted, not money in hand"
+			: "No loot in this range");
+
+		final List<DashboardCharts.Bar> bars = new ArrayList<>();
+		for (DashboardStats.ItemTotal it : loot)
+		{
+			final String name = name(it.getItemId());
+			bars.add(new DashboardCharts.Bar(name, it.getGp(), PanelUi.gpPlain(it.getGp()), DashboardTheme.GAIN,
+				"<b>" + PanelUi.escape(name) + "</b>"
+					+ "<br>Looted ×" + QuantityFormatter.formatNumber(it.getQty())
+					+ "<br>Estimated " + PanelUi.gp(it.getGp()) + " (" + PanelUi.gp(it.getGp() / Math.max(1, it.getQty()))
+					+ " each, GE value at run end)"
+					+ (total > 0 ? "<br>" + pct(it.getGp(), total) + " of estimated loot value" : ""),
+				icon(it.getItemId(), lootChart)));
+		}
+		lootChart.setData(bars, null);
+	}
+
+	private static boolean isCoins(int itemId)
+	{
+		return itemId == net.runelite.api.gameval.ItemID.COINS || itemId == net.runelite.api.gameval.ItemID.PLATINUM;
+	}
+
+	private void driftBars(List<DashboardStats.Drift> drift)
+	{
+		long net = 0;
+		long projected = 0;
+		long tax = 0;
+		long units = 0;
+		final List<DashboardCharts.Bar> bars = new ArrayList<>();
+		for (DashboardStats.Drift d : drift)
+		{
+			net += d.getNet();
+			projected += d.getProjected();
+			tax += d.getTax();
+			units += d.getQty();
+			final String name = name(d.getItemId());
+			bars.add(new DashboardCharts.Bar(name, d.drift(), PanelUi.sign(d.drift()), signColor(d.drift()),
+				"<b>" + PanelUi.escape(name) + "</b>"
+					+ "<br>Sold ×" + QuantityFormatter.formatNumber(d.getQty()) + " for " + PanelUi.gp(d.getNet())
+					+ (d.getTax() > 0 ? " (after " + PanelUi.gpPlain(d.getTax()) + " tax)" : "")
+					+ "<br>Valued at " + PanelUi.gp(d.getProjected()) + " when looted"
+					+ "<br>Drift " + PanelUi.sign(d.drift())
+					+ (d.getProjected() > 0 ? " (" + signedPct(d.drift(), d.getProjected()) + ")" : ""),
+				icon(d.getItemId(), driftChart)));
+		}
+		soldStat.set(drift.isEmpty() ? "—" : PanelUi.gpPlain(net), drift.isEmpty() ? DashboardTheme.MUTED : DashboardTheme.GAIN,
+			drift.isEmpty() ? "Nothing sold or alched in this range"
+				: QuantityFormatter.formatNumber(units) + " items"
+					+ (tax > 0 ? "  ·  after " + PanelUi.gpPlain(tax) + " GE tax" : "")
+					+ "  ·  valued at " + PanelUi.gpPlain(projected) + " when looted");
+		driftChart.setData(bars, drift.isEmpty() ? null : "Overall " + PanelUi.sign(net - projected)
+			+ (projected > 0 ? " (" + signedPct(net - projected, projected) + ")" : ""));
+	}
+
+	private void costBars(DashboardStats.Costs costs)
+	{
+		final long total = costs.getTypes().stream().mapToLong(DashboardStats.TypeTotal::getGp).sum();
+		final List<DashboardCharts.Bar> types = new ArrayList<>();
+		for (DashboardStats.TypeTotal t : costs.getTypes())
+		{
+			types.add(new DashboardCharts.Bar(t.getType().getLabel(), t.getGp(), PanelUi.gpPlain(t.getGp()),
+				costColor(t.getType()),
+				"<b>" + t.getType().getLabel() + "</b><br>" + PanelUi.gp(t.getGp())
+					+ (total > 0 ? " · " + pct(t.getGp(), total) + " of cost" : ""),
+				null));
+		}
+		costTypeChart.setData(types, total > 0 ? "Total " + PanelUi.gpPlain(total) : null);
+
+		final List<DashboardCharts.Bar> items = new ArrayList<>();
+		for (DashboardStats.CostItem c : costs.getItems())
+		{
+			// deaths are one line in the type bar already; here they'd just bury the supplies
+			if (c.getType() == DashboardStats.CostType.DEATHS)
+			{
+				continue;
+			}
+			items.add(new DashboardCharts.Bar(c.getLabel(), c.getGp(), PanelUi.gpPlain(c.getGp()),
+				costColor(c.getType()),
+				"<b>" + PanelUi.escape(c.getLabel()) + "</b><br>" + c.getType().getLabel()
+					+ "<br>×" + QuantityFormatter.formatNumber(c.getCount())
+					+ " · " + PanelUi.gp(c.getGp() / Math.max(1, c.getCount())) + " each",
+				null));
+		}
+		costItemChart.setData(items, null);
+	}
+
+	private static Color costColor(DashboardStats.CostType t)
+	{
+		switch (t)
+		{
+			case SUPPLIES:
+				return PanelUi.SUPPLIES_COLOR;
+			case SPELLS:
+				return PanelUi.SPELL_COLOR;
+			case TELEPORTS:
+				return PanelUi.TELEPORT_COLOR;
+			case DEATHS:
+				return DashboardTheme.LOSS;
+			case SKILLING:
+				return PanelUi.SKILLING_COLOR;
+			default:
+				return PanelUi.AMMO_COLOR;
+		}
+	}
+
+	private String name(int itemId)
+	{
+		return names.getOrDefault(itemId, "Item " + itemId);
+	}
+
+	/** The item's sprite, requested once and repainting {@code chart} when it finishes loading. */
+	private Image icon(int itemId, Component chart)
+	{
+		if (itemManager == null)
+		{
+			return null;
+		}
+		final Function<Integer, AsyncBufferedImage> load = id ->
+		{
+			final AsyncBufferedImage img = itemManager.getImage(id);
+			img.onLoaded(() ->
+			{
+				lootChart.repaint();
+				driftChart.repaint();
+			});
+			return img;
+		};
+		return icons.computeIfAbsent(itemId, load);
+	}
+
+	private static String pct(long part, long whole)
+	{
+		return (part * 100 / whole) + "%";
+	}
+
+	private static String signedPct(long part, long whole)
+	{
+		final long p = part * 100 / whole;
+		return (p >= 0 ? "+" : "") + p + "%";
 	}
 
 	private static Color signColor(long v)
@@ -149,6 +480,59 @@ class DashboardWindow extends JDialog
 	}
 
 	// ------------------------------------------------------------------ layout
+
+	private JPanel tabRow()
+	{
+		final JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+		row.setOpaque(false);
+		for (Page p : Page.values())
+		{
+			final DashboardTheme.Tab tab = new DashboardTheme.Tab(p.label, false, () ->
+			{
+				showPage(p);
+				config.dashboardPage(p.name());
+			});
+			tabs.put(p, tab);
+			row.add(tab);
+			row.add(gap(24));
+		}
+		return row;
+	}
+
+	private void showPage(Page p)
+	{
+		pages.show(pageHolder, p.name());
+		tabs.forEach((k, t) -> t.setOn(k == p));
+		footnote.setText(p.note);
+	}
+
+	private JPanel overviewPage()
+	{
+		final JPanel page = new JPanel(new BorderLayout(0, 12));
+		page.setOpaque(false);
+		page.add(pair(netChart, topChart), BorderLayout.NORTH);
+		page.add(table(), BorderLayout.CENTER);
+		return page;
+	}
+
+	/** A stat card stacked over a chart that fills the rest of the height. */
+	private static JPanel column(Component head, Component body)
+	{
+		final JPanel p = new JPanel(new BorderLayout(0, 12));
+		p.setOpaque(false);
+		p.add(head, BorderLayout.NORTH);
+		p.add(body, BorderLayout.CENTER);
+		return p;
+	}
+
+	private static JPanel pair(Component left, Component right)
+	{
+		final JPanel p = new JPanel(new GridLayout(1, 2, 12, 0));
+		p.setOpaque(false);
+		p.add(left);
+		p.add(right);
+		return p;
+	}
 
 	private JPanel filterBar()
 	{
@@ -163,6 +547,7 @@ class DashboardWindow extends JDialog
 			final DashboardTheme.Chip chip = new DashboardTheme.Chip(r.getLabel(), r == range, () ->
 			{
 				range = r;
+				config.dashboardRange(r.name());
 				rangeChips.forEach((k, c) -> c.setOn(k == r));
 				recompute();
 			});
@@ -185,6 +570,7 @@ class DashboardWindow extends JDialog
 				{
 					categories.remove(c);
 				}
+				saveCategories();
 				recompute();
 			});
 			left.add(self[0]);
@@ -200,20 +586,8 @@ class DashboardWindow extends JDialog
 		row.setOpaque(false);
 		for (Tile t : Tile.values())
 		{
-			final DashboardTheme.Card tile = new DashboardTheme.Card(new BorderLayout(0, 4));
-			tile.setBorder(BorderFactory.createEmptyBorder(14, 16, 14, 16));
-			final JLabel name = new JLabel(t.label.toUpperCase());
-			name.setFont(DashboardTheme.caps(10.5f));
-			name.setForeground(DashboardTheme.MUTED);
-			final JLabel value = new JLabel("—");
-			value.setFont(DashboardTheme.font(Font.BOLD, 24f));
-			final JLabel sub = new JLabel(" ");
-			sub.setFont(DashboardTheme.font(Font.PLAIN, 12f));
-			sub.setForeground(DashboardTheme.MUTED);
-			tile.add(name, BorderLayout.NORTH);
-			tile.add(value, BorderLayout.CENTER);
-			tile.add(sub, BorderLayout.SOUTH);
-			tiles.put(t, new JLabel[]{value, sub});
+			final DashboardTheme.Stat tile = new DashboardTheme.Stat(t.label);
+			tiles.put(t, tile);
 			row.add(tile);
 		}
 		return row;
@@ -246,11 +620,19 @@ class DashboardWindow extends JDialog
 		t.setDefaultRenderer(String.class, new CellRenderer());
 		t.setDefaultRenderer(Long.class, new CellRenderer());
 		t.getColumnModel().getColumn(0).setPreferredWidth(220);
+		t.getColumnModel().getColumn(1).setPreferredWidth(130);
 
 		final JScrollPane sp = new JScrollPane(t);
 		sp.setBorder(BorderFactory.createEmptyBorder());
 		sp.setOpaque(false);
 		sp.getViewport().setBackground(DashboardTheme.CARD);
+		sp.getVerticalScrollBar().setUI(new DashboardTheme.SlimScrollBarUI());
+		sp.getVerticalScrollBar().setPreferredSize(new Dimension(10, 0));
+		sp.getVerticalScrollBar().setOpaque(false);
+		sp.getVerticalScrollBar().setUnitIncrement(30);
+		sp.getHorizontalScrollBar().setUI(new DashboardTheme.SlimScrollBarUI());
+		sp.getHorizontalScrollBar().setPreferredSize(new Dimension(0, 10));
+		sp.getHorizontalScrollBar().setOpaque(false);
 
 		final DashboardTheme.Card card = new DashboardTheme.Card(new BorderLayout());
 		card.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
@@ -260,10 +642,7 @@ class DashboardWindow extends JDialog
 
 	private void setTile(Tile t, String value, Color color, String sub)
 	{
-		final JLabel[] l = tiles.get(t);
-		l[0].setText(value);
-		l[0].setForeground(color);
-		l[1].setText(sub);
+		tiles.get(t).set(value, color, sub);
 	}
 
 	private static JLabel caption(String text)
