@@ -62,6 +62,53 @@ public class DashboardStatsTest
 	}
 
 	@Test
+	public void lastSavedIsNewestRunEnd()
+	{
+		final List<RunRecord> runs = Arrays.asList(
+			new RunRecord(SessionHistory.SCHEMA, "session", "2026-10-24T08:00:00Z", "2026-10-24T09:00:00Z", 3600, "GE",
+				Collections.emptyMap()),
+			new RunRecord(SessionHistory.SCHEMA, "session", "2026-10-24T10:00:00Z", "2026-10-24T11:30:00Z", 5400, "GE",
+				Collections.emptyMap()),
+			new RunRecord(SessionHistory.SCHEMA, "session", "2026-10-24T12:00:00Z", "garbage", 0, "GE",
+				Collections.emptyMap()));
+		assertEquals(Instant.parse("2026-10-24T11:30:00Z"), DashboardStats.lastSaved(runs));
+		assertNull(DashboardStats.lastSaved(Collections.emptyList()));
+	}
+
+	@Test
+	public void saveStatusText()
+	{
+		assertEquals("Nothing saved yet", DashboardWindow.saveStatusText(null, null, NOW));
+		assertEquals("Saved just now", DashboardWindow.saveStatusText(NOW.minusSeconds(20), null, NOW));
+		assertEquals("Saved 3m ago · next save in 1:05",
+			DashboardWindow.saveStatusText(NOW.minusSeconds(200), NOW.plusSeconds(65), NOW));
+		assertEquals("Saved 2h ago · next save any moment",
+			DashboardWindow.saveStatusText(NOW.minusSeconds(7300), NOW.minusSeconds(1), NOW));
+	}
+
+	@Test
+	public void missedIsDropsLeftBehindOnCombatOnly()
+	{
+		final List<RunRecord> runs = Arrays.asList(
+			run("2026-10-24T08:00:00Z", 600, "Vorkath", new RunRecord.MobRun(2, 7_000, 10_000, 0, 0, Collections.emptyList())),
+			run("2026-10-24T09:00:00Z", 600, "Vorkath", new RunRecord.MobRun(1, 3_000, 3_500, 0, 0, Collections.emptyList())),
+			// an old record with no dropped figure must not go negative
+			run("2026-10-24T10:00:00Z", 600, "Zulrah", new RunRecord.MobRun(1, 4_000, 0, 0, 0, Collections.emptyList())),
+			// a skill's "dropped" is what it produced - never missed
+			run("2026-10-24T11:00:00Z", 600, "Fishing", new RunRecord.MobRun(0, 900, 1_200, 0, 0, Collections.emptyList())));
+
+		final Map<String, DashboardStats.Activity> byName = new LinkedHashMap<>();
+		for (DashboardStats.Activity a : compute(runs, DashboardStats.Range.ALL, ALL).getActivities())
+		{
+			byName.put(a.getName(), a);
+		}
+		assertEquals(13_500, byName.get("Vorkath").getDropped());
+		assertEquals(3_500, byName.get("Vorkath").missed());
+		assertEquals(0, byName.get("Zulrah").missed());
+		assertEquals(0, byName.get("Fishing").missed());
+	}
+
+	@Test
 	public void lootGroupsItemsAcrossRunsForIncludedActivities()
 	{
 		final List<RunRecord> runs = Arrays.asList(

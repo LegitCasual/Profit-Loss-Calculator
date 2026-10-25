@@ -5,6 +5,7 @@
 package com.profitlosscalculator;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import static org.junit.Assert.assertEquals;
@@ -119,6 +120,69 @@ public class LootCollectorTest
 		lc.add(drop(WHIP, 1), 100);
 		lc.expire(100 + LootCollector.MAX_AGE_TICKS + 1);
 		assertEquals(0, lc.openDrops());
+	}
+
+	@Test
+	public void droppingCollectedLootTakesItBackOutAndPickingItUpRestoresIt()
+	{
+		final LootCollector lc = new LootCollector();
+		final IncomeEvent d = drop(WHIP, 1, SHARK, 3);
+		lc.add(d, 100);
+		lc.correlate(gains(WHIP, 1, SHARK, 3), 101);
+		assertTrue(d.fullyCollected());
+
+		// dropped 5 sharks - 3 were loot, the other 2 the player's own
+		assertEquals(3, lc.uncollect(Arrays.asList(d), SHARK, 5));
+		assertEquals(3, d.outstanding(SHARK));
+		assertFalse(d.getCollected().containsKey(SHARK));
+
+		final Map<Integer, Integer> back = gains(SHARK, 2);
+		assertTrue(lc.recollect(back));
+		assertTrue(back.isEmpty());
+		assertEquals(1, d.outstanding(SHARK));
+	}
+
+	@Test
+	public void droppingAStackThatIsHalfLootOnlyTakesTheLootHalf()
+	{
+		final int mind = 558;
+		final LootCollector lc = new LootCollector();
+		final IncomeEvent d = drop(mind, 18);
+		lc.add(d, 100);
+		lc.correlate(gains(mind, 18), 101);
+
+		// 18 of your own + 18 looted = 36 dropped
+		assertEquals(18, lc.uncollect(Arrays.asList(d), mind, 36));
+		assertEquals(18, d.outstanding(mind));
+
+		// all 36 back: 18 restored to the drop, 18 left for the caller's own-items pool
+		final Map<Integer, Integer> back = gains(mind, 36);
+		assertTrue(lc.recollect(back));
+		assertEquals(Integer.valueOf(18), back.get(mind));
+		assertTrue(d.fullyCollected());
+
+		// and round two behaves the same
+		assertEquals(18, lc.uncollect(Arrays.asList(d), mind, 36));
+		lc.recollect(gains(mind, 36));
+		assertTrue(d.fullyCollected());
+	}
+
+	@Test
+	public void uncollectTakesFromTheNewestLootAndSkipsSkilling()
+	{
+		final LootCollector lc = new LootCollector();
+		final IncomeEvent older = drop(SHARK, 2);
+		final IncomeEvent newer = drop(SHARK, 2);
+		older.collect(SHARK, 2);
+		newer.collect(SHARK, 2);
+		final Map<Integer, Integer> cooked = new HashMap<>();
+		cooked.put(SHARK, 5);
+		final IncomeEvent skilling = new IncomeEvent(IncomeEvent.Type.SKILLING, Instant.now(), "Cooking", cooked);
+
+		assertEquals(3, lc.uncollect(Arrays.asList(older, newer, skilling), SHARK, 3));
+		assertEquals(5, skilling.getCollected().get(SHARK).intValue());
+		assertEquals(2, newer.outstanding(SHARK));
+		assertEquals(1, older.outstanding(SHARK));
 	}
 
 	@Test

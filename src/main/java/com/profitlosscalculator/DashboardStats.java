@@ -152,6 +152,7 @@ final class DashboardStats
 				a.runs++;
 				a.kills += mr.getKills();
 				a.gained += mr.getGained();
+				a.dropped += mr.getDropped();
 				a.cost += mr.getCost();
 				if (mr.getItems() != null)
 				{
@@ -199,7 +200,7 @@ final class DashboardStats
 			gained += a.gained;
 			cost += a.cost;
 			kills += a.kills;
-			list.add(new Activity(e.getKey(), categoryOf(e.getKey()), a.runs, a.kills, a.gained, a.cost,
+			list.add(new Activity(e.getKey(), categoryOf(e.getKey()), a.runs, a.kills, a.gained, a.dropped, a.cost,
 				a.gained - a.cost, a.timedSec, a.timedNet));
 		}
 		list.sort(Comparator.comparingLong(Activity::getNet).reversed());
@@ -283,6 +284,22 @@ final class DashboardStats
 		return new Costs(types, items);
 	}
 
+	/** When history was last written - the newest run end (an ambient checkpoint stamps its
+	 *  end with the checkpoint time) - or null with no readable runs. */
+	static Instant lastSaved(List<RunRecord> runs)
+	{
+		Instant last = null;
+		for (RunRecord r : runs)
+		{
+			final Instant end = r == null ? null : parse(r.getEnd());
+			if (end != null && (last == null || end.isAfter(last)))
+			{
+				last = end;
+			}
+		}
+		return last;
+	}
+
 	private static boolean inRange(Instant t, Instant from, Instant now)
 	{
 		return t != null && (from == null || !t.isBefore(from)) && !t.isAfter(now);
@@ -348,6 +365,7 @@ final class DashboardStats
 		private int runs;
 		private int kills;
 		private long gained;
+		private long dropped;
 		private long cost;
 		private long timedSec;
 		private long timedNet;
@@ -461,12 +479,21 @@ final class DashboardStats
 		int runs;
 		int kills;
 		long gained;
+		/** everything that dropped, picked up or not (0 on records that predate it). */
+		long dropped;
 		long cost;
 		long net;
 		/** wall-clock seconds of the runs where this was the only activity. */
 		long timedSec;
 		/** net earned over those timed runs. */
 		long timedNet;
+
+		/** Value of drops left on the ground. Only combat loot can be missed - a skill's
+		 *  "drops" are what it produced - and runs counting uncollected drops record none. */
+		long missed()
+		{
+			return category == Category.COMBAT ? Math.max(0, dropped - gained) : 0;
+		}
 
 		long gpPerKill()
 		{

@@ -102,4 +102,25 @@ class IncomeEvent
 		}
 		return room;
 	}
+
+	/** Take up to {@code qty} of {@code id} back out of collected (the player dropped it);
+	 *  returns how many were actually removed. */
+	int uncollect(int id, int qty)
+	{
+		final int have = collected.getOrDefault(id, 0);
+		final int took = Math.min(qty, have);
+		if (took <= 0)
+		{
+			return 0;
+		}
+		if (took == have)
+		{
+			collected.remove(id);
+		}
+		else
+		{
+			collected.put(id, have - took);
+		}
+		return took;
+	}
 }

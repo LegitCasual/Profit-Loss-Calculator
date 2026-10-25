@@ -39,11 +39,29 @@ class LootCollector
 		}
 	}
 
+	/** Loot the player dropped back on the floor - taken out of its event's collected so it
+	 *  stops counting (and reads as missed), restored if it's picked back up. */
+	private static final class Dropped
+	{
+		private final IncomeEvent event;
+		private final int id;
+		private int qty;
+
+		private Dropped(IncomeEvent event, int id, int qty)
+		{
+			this.event = event;
+			this.id = id;
+			this.qty = qty;
+		}
+	}
+
 	private final List<Open> open = new ArrayList<>();
+	private final List<Dropped> dropped = new ArrayList<>();
 
 	void clear()
 	{
 		open.clear();
+		dropped.clear();
 	}
 
 	/** Register a monster / PvP loot drop to watch for pickups. */
@@ -100,6 +118,63 @@ class LootCollector
 		}
 		src.values().removeIf(v -> v <= 0);
 		open.removeIf(o -> o.event.fullyCollected());
+		return moved;
+	}
+
+	/**
+	 * The player dropped {@code qty} of {@code id}: take it back out of the collected loot in
+	 * {@code income}, newest event first, so it no longer counts toward net. Skilling output
+	 * and alch coins aren't loot and are left alone.
+	 *
+	 * @return how many were un-collected - the rest was the player's own stuff
+	 */
+	int uncollect(List<IncomeEvent> income, int id, int qty)
+	{
+		int left = qty;
+		for (int i = income.size() - 1; i >= 0 && left > 0; i--)
+		{
+			final IncomeEvent e = income.get(i);
+			if (e.getType() == IncomeEvent.Type.SKILLING || e.getType() == IncomeEvent.Type.ALCH)
+			{
+				continue;
+			}
+			final int took = e.uncollect(id, left);
+			if (took > 0)
+			{
+				dropped.add(new Dropped(e, id, took));
+				left -= took;
+			}
+		}
+		return qty - left;
+	}
+
+	/**
+	 * Re-credit loot the player dropped and has now picked back up, most recently dropped
+	 * first. Mutates {@code gains} down as it consumes them.
+	 *
+	 * @return true if anything was restored
+	 */
+	boolean recollect(Map<Integer, Integer> gains)
+	{
+		boolean moved = false;
+		for (int i = dropped.size() - 1; i >= 0; i--)
+		{
+			final Dropped d = dropped.get(i);
+			final int have = gains.getOrDefault(d.id, 0);
+			if (have <= 0)
+			{
+				continue;
+			}
+			final int took = d.event.collect(d.id, Math.min(have, d.qty));
+			if (took > 0)
+			{
+				gains.put(d.id, have - took);
+				d.qty -= took;
+				moved = true;
+			}
+		}
+		dropped.removeIf(d -> d.qty <= 0);
+		gains.values().removeIf(v -> v <= 0);
 		return moved;
 	}
 

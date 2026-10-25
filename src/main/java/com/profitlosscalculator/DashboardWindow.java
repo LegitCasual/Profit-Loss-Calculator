@@ -11,9 +11,12 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.Image;
 import java.awt.Window;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -34,6 +37,7 @@ import javax.swing.JTable;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
+import javax.swing.Timer;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.JTableHeader;
@@ -47,7 +51,8 @@ import net.runelite.client.util.QuantityFormatter;
  * The History dashboard: a separate, non-modal window over the client. A date-range and
  * category filter and headline tiles sit above three pages - Overview (net over time, top
  * activities, a sortable per-activity table), Loot (what the loot is made of, and how sold
- * loot's price drifted) and Costs (where the gp went, by type and by item). Fed via
+ * loot's price drifted) and Costs (where the gp went, by type and by item). A banner on top
+ * flags an explicit run that's still live, since it only reaches history on Stop. Fed via
  * {@link #setData}; all filtering is {@link DashboardStats}, all styling {@link DashboardTheme}.
  *
  * <p>EDT only.
@@ -62,6 +67,7 @@ class DashboardWindow extends JFrame
 	/** Remembers range / categories / page between opens (hidden keys). */
 	private final ProfitLossCalculatorConfig config;
 	private final Runnable onRefresh;
+	private final Runnable onStop;
 
 	private DashboardStats.Input input = new DashboardStats.Input(
 		Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
@@ -75,9 +81,17 @@ class DashboardWindow extends JFrame
 	private final Map<Tile, DashboardTheme.Stat> tiles = new EnumMap<>(Tile.class);
 	private final DashboardTheme.Stat lootedStat = new DashboardTheme.Stat("Looted · estimated value");
 	private final DashboardTheme.Stat soldStat = new DashboardTheme.Stat("Sold & alched · money received");
+	private final DashboardTheme.Stat missedStat = new DashboardTheme.Stat("Left on the floor · estimated value");
 	private final CardLayout pages = new CardLayout();
 	private final JPanel pageHolder = new JPanel(pages);
 	private final JLabel footnote = new JLabel();
+	private final JLabel liveRunText = new JLabel();
+	private final JLabel saveStatus = new JLabel();
+	/** Ticks the "saved ... ago / next save in ..." tag along between data pushes. */
+	private final Timer saveClock = new Timer(1000, e -> updateSaveStatus());
+	private Instant lastSaved;
+	private Instant nextSave;
+	private final JPanel liveRunBanner;
 
 	private final DashboardCharts.NetOverTime netChart = new DashboardCharts.NetOverTime();
 	private final DashboardCharts.BarList topChart =
@@ -87,6 +101,8 @@ class DashboardWindow extends JFrame
 		new DashboardCharts.BarList("Loot by estimated value", LIST_ROWS, "No loot in this range");
 	private final DashboardCharts.BarList driftChart =
 		new DashboardCharts.BarList("Price drift on sold loot", LIST_ROWS, "Nothing sold or alched in this range");
+	private final DashboardCharts.BarList missedChart =
+		new DashboardCharts.BarList("Missed loot by activity", LIST_ROWS, "Nothing left behind in this range");
 	private final DashboardCharts.StackedBar costTypeChart =
 		new DashboardCharts.StackedBar("Cost by type", "No costs in this range");
 	private final DashboardCharts.BarList costActivityChart =
@@ -111,7 +127,8 @@ class DashboardWindow extends JFrame
 		OVERVIEW("Overview", "gp / hr only counts runs where that activity was the only one - mixed sessions have "
 			+ "no per-activity time yet. Best gp / hr needs " + (BEST_MIN_SEC / 60) + "+ min of timed runs."),
 		LOOT("Loot", "Looted value is an estimate - the GE price of what you picked up, frozen at each run's end. "
-			+ "Price drift compares what sold or alched loot actually brought in (after GE tax) with that estimate."),
+			+ "Price drift compares what sold or alched loot actually brought in (after GE tax) with that estimate. "
+			+ "Missed loot is whatever dropped but wasn't picked up."),
 		COSTS("Costs", "From the session logs. Ammo and weapon charges aren't logged one by one - they show as "
 			+ "\"Ammo, charges & other\" when every category is included.");
 
@@ -130,12 +147,15 @@ class DashboardWindow extends JFrame
 	 *               dashboard is its own top-level frame (own taskbar entry, can sit behind the
 	 *               game), not a dialog owned by the client
 	 */
-	DashboardWindow(Window client, ItemManager itemManager, ProfitLossCalculatorConfig config, Runnable onRefresh)
+	DashboardWindow(Window client, ItemManager itemManager, ProfitLossCalculatorConfig config, Runnable onRefresh,
+		Runnable onStop)
 	{
 		super("Profit Loss Dashboard");
 		this.itemManager = itemManager;
 		this.config = config;
 		this.onRefresh = onRefresh;
+		this.onStop = onStop;
+		liveRunBanner = liveRunBanner();
 		setDefaultCloseOperation(HIDE_ON_CLOSE);
 		setIconImage(ImageUtil.loadImageResource(ProfitLossCalculatorPlugin.class, "panel_icon.png"));
 
@@ -157,7 +177,11 @@ class DashboardWindow extends JFrame
 
 		final JPanel top = new JPanel(new BorderLayout(0, 12));
 		top.setOpaque(false);
-		top.add(tabRow(), BorderLayout.NORTH);
+		final JPanel bannerAndTabs = new JPanel(new BorderLayout(0, 12));
+		bannerAndTabs.setOpaque(false);
+		bannerAndTabs.add(liveRunBanner, BorderLayout.NORTH);
+		bannerAndTabs.add(tabRow(), BorderLayout.CENTER);
+		top.add(bannerAndTabs, BorderLayout.NORTH);
 		final JPanel filtersAndTiles = new JPanel(new BorderLayout(0, 12));
 		filtersAndTiles.setOpaque(false);
 		filtersAndTiles.add(filterBar(), BorderLayout.NORTH);
@@ -167,7 +191,8 @@ class DashboardWindow extends JFrame
 
 		pageHolder.setOpaque(false);
 		pageHolder.add(overviewPage(), Page.OVERVIEW.name());
-		pageHolder.add(pair(column(lootedStat, lootChart), column(soldStat, driftChart)), Page.LOOT.name());
+		pageHolder.add(row(column(lootedStat, lootChart), column(soldStat, driftChart), column(missedStat, missedChart)),
+			Page.LOOT.name());
 		pageHolder.add(column(costTypeChart, pair(costActivityChart, costItemChart)), Page.COSTS.name());
 		root.add(pageHolder, BorderLayout.CENTER);
 
@@ -181,6 +206,14 @@ class DashboardWindow extends JFrame
 		setLocationRelativeTo(client);
 		showPage(page);
 		recompute();
+		saveClock.start();
+	}
+
+	@Override
+	public void dispose()
+	{
+		saveClock.stop();
+		super.dispose();
 	}
 
 	/** Bring the window up - restored if minimised - and to the front. */
@@ -223,7 +256,85 @@ class DashboardWindow extends JFrame
 	{
 		this.input = input;
 		this.names = names == null ? Collections.emptyMap() : names;
+		lastSaved = DashboardStats.lastSaved(input.getRuns());
+		updateSaveStatus();
 		recompute();
+	}
+
+	/**
+	 * @param run      the live explicit run's kind, shown in the in-progress banner; null hides it
+	 * @param nextSave when the ambient run will next checkpoint itself, or null if none is due
+	 */
+	void setRunStatus(String run, Instant nextSave)
+	{
+		this.nextSave = nextSave;
+		updateSaveStatus();
+		liveRunBanner.setVisible(run != null);
+		if (run != null)
+		{
+			liveRunText.setText("<html><b>" + PanelUi.escape(run) + " in progress</b> - its loot and costs "
+				+ "aren't on the dashboard yet. Press Stop to save it.</html>");
+		}
+	}
+
+	private void updateSaveStatus()
+	{
+		saveStatus.setText(saveStatusText(lastSaved, nextSave, Instant.now()));
+	}
+
+	/** "Saved 2m ago · next save in 1:24"; the second half only while an auto-save is due. */
+	static String saveStatusText(Instant last, Instant next, Instant now)
+	{
+		final StringBuilder sb = new StringBuilder();
+		if (last == null)
+		{
+			sb.append("Nothing saved yet");
+		}
+		else
+		{
+			final long ago = Math.max(0, Duration.between(last, now).getSeconds());
+			sb.append("Saved ").append(ago < 60 ? "just now"
+				: ago < 3600 ? (ago / 60) + "m ago"
+				: ago < 86400 ? (ago / 3600) + "h ago"
+				: (ago / 86400) + "d ago");
+		}
+		if (next != null)
+		{
+			final long in = Duration.between(now, next).getSeconds();
+			sb.append(" · next save ").append(in <= 0 ? "any moment" : "in " + (in / 60) + ":" + String.format("%02d", in % 60));
+		}
+		return sb.toString();
+	}
+
+	private JPanel liveRunBanner()
+	{
+		final JPanel banner = new JPanel(new BorderLayout(12, 0))
+		{
+			@Override
+			protected void paintComponent(Graphics g0)
+			{
+				final Graphics2D g = DashboardTheme.smooth(g0);
+				try
+				{
+					g.setColor(DashboardTheme.alpha(DashboardTheme.ACCENT, 38));
+					g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+					g.setColor(DashboardTheme.alpha(DashboardTheme.ACCENT, 150));
+					g.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 10, 10);
+				}
+				finally
+				{
+					g.dispose();
+				}
+			}
+		};
+		banner.setOpaque(false);
+		banner.setBorder(BorderFactory.createEmptyBorder(6, 14, 6, 8));
+		liveRunText.setFont(DashboardTheme.font(Font.PLAIN, 13f));
+		liveRunText.setForeground(DashboardTheme.TEXT);
+		banner.add(liveRunText, BorderLayout.CENTER);
+		banner.add(new DashboardTheme.Chip("Stop", false, onStop), BorderLayout.EAST);
+		banner.setVisible(false);
+		return banner;
 	}
 
 	private void recompute()
@@ -254,6 +365,7 @@ class DashboardWindow extends JFrame
 		model.setRows(r.getActivities());
 		lootBars(r.getLoot());
 		driftBars(r.getDrift());
+		missedBars(r.getActivities());
 		costBars(r.getCosts());
 		costActivityBars(r.getActivities());
 	}
@@ -385,6 +497,44 @@ class DashboardWindow extends JFrame
 					+ "  ·  valued at " + PanelUi.gpPlain(projected) + " when looted");
 		driftChart.setData(bars, drift.isEmpty() ? null : "Overall " + PanelUi.sign(net - projected)
 			+ (projected > 0 ? " (" + signedPct(net - projected, projected) + ")" : ""));
+	}
+
+	/** Combat loot that dropped but was never picked up, per mob. */
+	private void missedBars(List<DashboardStats.Activity> activities)
+	{
+		final List<DashboardStats.Activity> sorted = new ArrayList<>();
+		long missed = 0;
+		long dropped = 0;
+		for (DashboardStats.Activity a : activities)
+		{
+			if (a.getCategory() != DashboardStats.Category.COMBAT || a.getDropped() <= 0)
+			{
+				continue;
+			}
+			dropped += a.getDropped();
+			if (a.missed() > 0)
+			{
+				sorted.add(a);
+				missed += a.missed();
+			}
+		}
+		sorted.sort((a, b) -> Long.compare(b.missed(), a.missed()));
+		final List<DashboardCharts.Bar> bars = new ArrayList<>();
+		for (DashboardStats.Activity a : sorted)
+		{
+			bars.add(new DashboardCharts.Bar(a.getName(), a.missed(), PanelUi.gpPlain(a.missed()), DashboardTheme.ACCENT,
+				"<b>" + PanelUi.escape(a.getName()) + "</b>"
+					+ "<br>Left " + PanelUi.gp(a.missed()) + " of " + PanelUi.gp(a.getDropped()) + " dropped"
+					+ " · picked up " + pct(a.getDropped() - a.missed(), a.getDropped())
+					+ (a.getKills() > 0 ? "<br>" + PanelUi.gp(a.missed() / a.getKills()) + " per kill" : "")
+					+ "<br>" + a.getRuns() + (a.getRuns() == 1 ? " run" : " runs"),
+				null));
+		}
+		missedStat.set(dropped == 0 ? "—" : missed > 0 ? "≈ " + PanelUi.gpPlain(missed) : "0",
+			missed > 0 ? DashboardTheme.ACCENT : DashboardTheme.MUTED,
+			dropped == 0 ? "No combat drops in this range"
+				: "Picked up " + pct(dropped - missed, dropped) + " of " + PanelUi.gpPlain(dropped) + " dropped");
+		missedChart.setData(bars, null);
 	}
 
 	private void costBars(DashboardStats.Costs costs)
@@ -527,10 +677,18 @@ class DashboardWindow extends JFrame
 
 	private static JPanel pair(Component left, Component right)
 	{
-		final JPanel p = new JPanel(new GridLayout(1, 2, 12, 0));
+		return row(left, right);
+	}
+
+	/** Equal-width columns side by side. */
+	private static JPanel row(Component... cols)
+	{
+		final JPanel p = new JPanel(new GridLayout(1, cols.length, 12, 0));
 		p.setOpaque(false);
-		p.add(left);
-		p.add(right);
+		for (Component c : cols)
+		{
+			p.add(c);
+		}
 		return p;
 	}
 
@@ -576,7 +734,15 @@ class DashboardWindow extends JFrame
 			left.add(self[0]);
 		}
 		bar.add(left, BorderLayout.CENTER);
-		bar.add(new DashboardTheme.Chip("Refresh", false, onRefresh), BorderLayout.EAST);
+		final JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+		right.setOpaque(false);
+		saveStatus.setFont(DashboardTheme.font(Font.PLAIN, 12f));
+		saveStatus.setForeground(DashboardTheme.MUTED);
+		saveStatus.setToolTipText("<html>Runs you start are saved when you press Stop.<br>"
+			+ "The always-on run saves itself every few minutes, and when you open a bank.</html>");
+		right.add(saveStatus);
+		right.add(new DashboardTheme.Chip("Refresh", false, onRefresh));
+		bar.add(right, BorderLayout.EAST);
 		return bar;
 	}
 

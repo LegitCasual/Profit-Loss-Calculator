@@ -250,6 +250,11 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private ProfitLossCalculatorPanel panel;
 	/** The History dashboard window, created on first open. Written on the EDT only. */
 	private volatile DashboardWindow dashboard;
+	/** The live-run banner text last handed to the dashboard. Client thread only. */
+	private String dashboardLiveRun;
+	/** The checkpoint tick the dashboard's next-save countdown was last based on (-1 = none
+	 *  due). Client thread only. */
+	private int dashboardSaveTick = -1;
 	private NavigationButton navButton;
 
 	/** The session being tracked (running or paused), or the last finished one for the panel. */
@@ -293,6 +298,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private final Map<Integer, Boolean> teleTabCache = new HashMap<>();
 	/** set by ammo reconciliation, flushed to the panel once per tick to avoid churn */
 	private boolean viewDirty;
+	/** tick the view was last rebuilt from {@link #onGameTick}. */
+	private int lastRateRefreshTick;
+	/** how often (ticks, ~6s) the view is rebuilt even with nothing new, so /hr tracks time. */
+	private static final int RATE_REFRESH_TICKS = 10;
 	/** NPC name -&gt; the most recent kill bucket for it. Attributes late loot and de-dups
 	 *  double-fired deaths (targeted farm only). */
 	private final Map<String, BossKill> lastKillByName = new HashMap<>();
@@ -744,10 +753,55 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		if (dashboard == null)
 		{
 			dashboard = new DashboardWindow(SwingUtilities.getWindowAncestor(p), itemManager, config,
-				this::onRefreshHistory);
+				this::onRefreshHistory, this::onStop);
 		}
 		dashboard.open();
 		pushDashboard();
+		clientThread.invoke(() -> pushRunStatus(true));
+	}
+
+	/**
+	 * Tell the dashboard whether an explicit run is live - it's only written to history on
+	 * Stop, so its loot and costs aren't on the dashboard yet - and when the ambient run will
+	 * next checkpoint itself (it doesn't need the banner). Client thread.
+	 */
+	private void pushRunStatus(boolean force)
+	{
+		final String live;
+		if (session == null || sessionFinished || session.isAmbient())
+		{
+			live = null;
+		}
+		else
+		{
+			switch (session.getMode())
+			{
+				case TARGETED:
+					live = "Targeted farm";
+					break;
+				case SLAYER:
+					live = "Slayer task";
+					break;
+				default:
+					live = "Session";
+			}
+		}
+		// mirrors the checkpoint condition in onGameTick
+		final int saveTick = tracking() && session.isAmbient() && (collectedTotal() > 0 || session.total() > 0)
+			? lastAmbientCheckpointTick : -1;
+		if (!force && java.util.Objects.equals(live, dashboardLiveRun) && saveTick == dashboardSaveTick)
+		{
+			return;
+		}
+		dashboardLiveRun = live;
+		dashboardSaveTick = saveTick;
+		final Instant nextSave = saveTick < 0 ? null : Instant.now().plusMillis(
+			Math.max(0, saveTick + AMBIENT_CHECKPOINT_TICKS - client.getTickCount()) * 600L);
+		final DashboardWindow d = dashboard;
+		if (d != null)
+		{
+			SwingUtilities.invokeLater(() -> d.setRunStatus(live, nextSave));
+		}
 	}
 
 	/** Hand the dashboard a fresh copy of every run, sale and logged cost (read on the history
@@ -970,6 +1024,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		lastAmbientCheckpointTick = client.getTickCount();
 		history.checkpoint(currentRunRecord(), this::pushHistory);
+		pushRunStatus(false);
 	}
 
 	private void stopSession()
@@ -1549,9 +1604,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			}
 		}
 
+		// the /hr figure is net over elapsed time - rebuild every few ticks so it follows the
+		// clock, rather than sitting stale until the next loot / cost / drop jumps it
+		if (!session.isPaused() && client.getTickCount() - lastRateRefreshTick >= RATE_REFRESH_TICKS)
+		{
+			viewDirty = true;
+		}
 		if (viewDirty)
 		{
 			viewDirty = false;
+			lastRateRefreshTick = client.getTickCount();
 			refreshView();
 		}
 	}
@@ -1761,15 +1823,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  your own item later isn't counted as income. */
 	private void maybeIntendPickup(MenuOptionClicked event)
 	{
-		if (!config.trackPickups())
-		{
-			return;
-		}
 		final String option = event.getMenuOption();
 
+		// always noted - dropping loot takes it back out of collected, pickups on or off
 		if ("Drop".equals(option) && event.getItemId() > 0)
 		{
 			dropIntent.put(event.getItemId(), client.getTickCount());
+			return;
+		}
+		if (!config.trackPickups())
+		{
 			return;
 		}
 
@@ -2122,7 +2185,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 	}
 
-	/** Move an inventory loss that followed a "Drop" click into the {@link #droppedOut} pool. */
+	/** An inventory loss that followed a "Drop" click: loot comes back out of collected (it's
+	 *  on the floor again - missed, not gained), anything else goes into the
+	 *  {@link #droppedOut} pool. */
 	private void trackDrops(Map<Integer, Integer> losses)
 	{
 		final int tick = client.getTickCount();
@@ -2136,16 +2201,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			final Integer di = dropIntent.get(id);
 			if (di != null && tick - di <= DROP_INTENT_TTL_TICKS)
 			{
-				droppedOut.merge(id, qty, Integer::sum);
+				final int loot = lootCollector.uncollect(session.getIncome(), id, qty);
+				if (loot > 0)
+				{
+					logger.line("loot_dropped")
+						.put("item", itemName(id))
+						.put("qty", loot)
+						.put("gp", lootValue(id, loot))
+						.submit();
+					viewDirty = true;
+				}
+				if (qty > loot)
+				{
+					droppedOut.merge(id, qty - loot, Integer::sum);
+				}
 				dropIntent.remove(id);
 			}
 		});
 	}
 
 	/**
-	 * A tick's inventory gains, in order of preference: collected loot for a drop we are
-	 * watching; then your own items coming back off the ground (not income); then - if you
-	 * clicked Take - an orphan ground pickup (or a late collect of an older drop).
+	 * A tick's inventory gains, in order of preference: loot you dropped coming back; collected
+	 * loot for a drop we are watching; then your own items coming back off the ground (not
+	 * income); then - if you clicked Take - an orphan ground pickup (or a late collect of an
+	 * older drop).
 	 */
 	private void reconcileIncome(Map<Integer, Integer> gains)
 	{
@@ -2154,7 +2233,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return;
 		}
 		final int tick = client.getTickCount();
-		boolean changed = lootCollector.correlate(gains, tick);
+		boolean changed = lootCollector.recollect(gains);
+		changed |= lootCollector.correlate(gains, tick);
 
 		// items the player dropped earlier are theirs coming back, not new income;
 		// coins already booked as alch income are likewise not fresh loot
@@ -3227,6 +3307,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	private void refreshView()
 	{
+		pushRunStatus(false);
 		final ProfitLossCalculatorPanel.View view = buildView();
 		if (view.equals(currentView))
 		{
@@ -3515,10 +3596,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			e.getItems().forEach((id, q) -> drop.get(mob).merge(id, q, Integer::sum));
 		}
 
-		// a High Alched looted item is realised, not potential - drop it from "gained"
+		// a High Alched looted item is realised, not potential - drop it from "gained", and from
+		// "dropped" too: it was picked up, so it mustn't read as loot left on the floor
 		final Map<Integer, Integer> alched = new HashMap<>(session.getAlchedItems());
-		for (Map<Integer, Integer> mobItems : got.values())
+		for (Map.Entry<String, Map<Integer, Integer>> me : got.entrySet())
 		{
+			final Map<Integer, Integer> mobItems = me.getValue();
+			final Map<Integer, Integer> mobDrops = drop.get(me.getKey());
 			for (Map.Entry<Integer, Integer> ae : alched.entrySet())
 			{
 				final Integer have = mobItems.get(ae.getKey());
@@ -3528,6 +3612,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				}
 				final int take = Math.min(have, ae.getValue());
 				mobItems.put(ae.getKey(), have - take);
+				mobDrops.merge(ae.getKey(), -take, Integer::sum);
 				ae.setValue(ae.getValue() - take);
 			}
 		}
