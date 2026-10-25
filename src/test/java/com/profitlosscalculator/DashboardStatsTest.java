@@ -76,6 +76,18 @@ public class DashboardStatsTest
 	}
 
 	@Test
+	public void compactShortensTheNumberAndKeepsTheRest()
+	{
+		assertEquals("+4.42M", DashboardTheme.compact("+4,422,000"));
+		assertEquals("≈ 985K", DashboardTheme.compact("≈ 984,500"));
+		assertEquals("-44.2K", DashboardTheme.compact("-44,200"));
+		assertEquals("1.00M", DashboardTheme.compact("999,999"));
+		assertEquals("1.23B gp", DashboardTheme.compact("1,234,567,890 gp"));
+		assertEquals("950", DashboardTheme.compact("950"));
+		assertEquals("12h 0m", DashboardTheme.compact("12h 0m"));
+	}
+
+	@Test
 	public void saveStatusText()
 	{
 		assertEquals("Nothing saved yet", DashboardWindow.saveStatusText(null, null, NOW));

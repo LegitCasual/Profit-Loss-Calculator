@@ -120,8 +120,9 @@ final class DashboardCharts
 
 		abstract void draw(Graphics2D g, int x, int y, int w, int h);
 
-		/** Right-aligned legend in the header; nothing by default. */
-		void legend(Graphics2D g, int right, int baseline)
+		/** Right-aligned legend in the header, kept clear of the title ({@code left}); nothing by
+		 *  default. */
+		void legend(Graphics2D g, int left, int right, int baseline)
 		{
 		}
 
@@ -135,8 +136,9 @@ final class DashboardCharts
 				g.setFont(DashboardTheme.font(Font.BOLD, 14f));
 				g.setColor(DashboardTheme.TEXT);
 				g.drawString(title, PAD, PAD + g.getFontMetrics().getAscent());
+				final int titleEnd = PAD + g.getFontMetrics().stringWidth(title) + 12;
 				g.setFont(DashboardTheme.font(Font.PLAIN, 11.5f));
-				legend(g, getWidth() - PAD, PAD + g.getFontMetrics().getAscent() + 1);
+				legend(g, titleEnd, getWidth() - PAD, PAD + g.getFontMetrics().getAscent() + 1);
 				draw(g, PAD, HEADER + 4, getWidth() - PAD * 2, getHeight() - HEADER - 4 - PAD);
 			}
 			finally
@@ -194,7 +196,7 @@ final class DashboardCharts
 		}
 
 		@Override
-		void legend(Graphics2D g, int right, int baseline)
+		void legend(Graphics2D g, int left, int right, int baseline)
 		{
 			final int r = legendItem(g, right, baseline, DashboardTheme.ACCENT, true, "Running total");
 			legendItem(g, r, baseline, DashboardTheme.GAIN, false, "Net");
@@ -389,9 +391,10 @@ final class DashboardCharts
 		}
 
 		@Override
-		void legend(Graphics2D g, int right, int baseline)
+		void legend(Graphics2D g, int left, int right, int baseline)
 		{
-			if (note != null)
+			// on a narrow card the note gives way to the title rather than overprinting it
+			if (note != null && right - g.getFontMetrics().stringWidth(note) >= left)
 			{
 				g.setColor(DashboardTheme.MUTED);
 				g.drawString(note, right - g.getFontMetrics().stringWidth(note), baseline);
@@ -529,9 +532,10 @@ final class DashboardCharts
 		}
 
 		@Override
-		void legend(Graphics2D g, int right, int baseline)
+		void legend(Graphics2D g, int left, int right, int baseline)
 		{
-			if (note != null)
+			// on a narrow card the note gives way to the title rather than overprinting it
+			if (note != null && right - g.getFontMetrics().stringWidth(note) >= left)
 			{
 				g.setColor(DashboardTheme.MUTED);
 				g.drawString(note, right - g.getFontMetrics().stringWidth(note), baseline);

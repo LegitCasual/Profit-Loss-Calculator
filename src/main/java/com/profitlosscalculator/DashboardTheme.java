@@ -25,7 +25,10 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComponent;
@@ -169,12 +172,61 @@ final class DashboardTheme
 			add(sub, BorderLayout.SOUTH);
 		}
 
+		/** the value as given; shown in {@link #compact} form only while it doesn't fit. */
+		private String full = "—";
+
 		void set(String text, Color color, String subText)
 		{
+			full = text;
 			value.setText(text);
 			value.setForeground(color);
 			sub.setText(subText == null || subText.isEmpty() ? " " : subText);
+			revalidate();
 		}
+
+		@Override
+		public void doLayout()
+		{
+			super.doLayout();
+			final int room = value.getWidth();
+			final String shown = room > 0 && value.getFontMetrics(value.getFont()).stringWidth(full) > room
+				? compact(full) : full;
+			if (!shown.equals(value.getText()))
+			{
+				value.setText(shown);
+			}
+		}
+	}
+
+	private static final Pattern BIG_NUMBER = Pattern.compile("\\d{1,3}(,\\d{3})+");
+
+	/**
+	 * The first comma-grouped number in {@code text} shortened to three significant figures -
+	 * "+4,422,000" becomes "+4.42M", "≈ 984,500" becomes "≈ 985K" - for when the full figure
+	 * doesn't fit. Text without one comes back unchanged.
+	 */
+	static String compact(String text)
+	{
+		final Matcher m = BIG_NUMBER.matcher(text);
+		if (!m.find())
+		{
+			return text;
+		}
+		final long n = Long.parseLong(m.group().replace(",", ""));
+		final String[] units = {"K", "M", "B", "T"};
+		double v = n;
+		int u = -1;
+		while (v >= 999.5 && u < units.length - 1)
+		{
+			v /= 1000;
+			u++;
+		}
+		if (u < 0)
+		{
+			return text;
+		}
+		final String num = String.format(Locale.ROOT, v >= 99.95 ? "%.0f" : v >= 9.995 ? "%.1f" : "%.2f", v);
+		return text.substring(0, m.start()) + num + units[u] + text.substring(m.end());
 	}
 
 	/** A page tab: larger text, white with an accent underline when selected. */

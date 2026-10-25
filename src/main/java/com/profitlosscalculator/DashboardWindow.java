@@ -34,6 +34,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
+import javax.swing.JTextArea;
 import javax.swing.RowSorter;
 import javax.swing.SortOrder;
 import javax.swing.SwingConstants;
@@ -81,10 +82,10 @@ class DashboardWindow extends JFrame
 	private final Map<Tile, DashboardTheme.Stat> tiles = new EnumMap<>(Tile.class);
 	private final DashboardTheme.Stat lootedStat = new DashboardTheme.Stat("Looted · estimated value");
 	private final DashboardTheme.Stat soldStat = new DashboardTheme.Stat("Sold & alched · money received");
-	private final DashboardTheme.Stat missedStat = new DashboardTheme.Stat("Left on the floor · estimated value");
+	private final DashboardTheme.Stat missedStat = new DashboardTheme.Stat("Missed loot · estimated value");
 	private final CardLayout pages = new CardLayout();
 	private final JPanel pageHolder = new JPanel(pages);
-	private final JLabel footnote = new JLabel();
+	private final JTextArea footnote = new JTextArea();
 	private final JLabel liveRunText = new JLabel();
 	private final JLabel saveStatus = new JLabel();
 	/** Ticks the "saved ... ago / next save in ..." tag along between data pushes. */
@@ -196,12 +197,19 @@ class DashboardWindow extends JFrame
 		pageHolder.add(column(costTypeChart, pair(costActivityChart, costItemChart)), Page.COSTS.name());
 		root.add(pageHolder, BorderLayout.CENTER);
 
+		// a text area, not a label, so a long note wraps on a narrow window instead of clipping
 		footnote.setFont(DashboardTheme.font(Font.PLAIN, 11.5f));
 		footnote.setForeground(DashboardTheme.MUTED);
+		footnote.setLineWrap(true);
+		footnote.setWrapStyleWord(true);
+		footnote.setEditable(false);
+		footnote.setFocusable(false);
+		footnote.setOpaque(false);
+		footnote.setBorder(BorderFactory.createEmptyBorder());
 		root.add(footnote, BorderLayout.SOUTH);
 
 		setContentPane(root);
-		setMinimumSize(new Dimension(860, 640));
+		setMinimumSize(new Dimension(860, 720));
 		setSize(1120, 880);
 		setLocationRelativeTo(client);
 		showPage(page);
@@ -444,7 +452,6 @@ class DashboardWindow extends JFrame
 		}
 		lootedStat.set(total > 0 ? "≈ " + PanelUi.gpPlain(total) : "—", DashboardTheme.TEXT, total > 0
 			? QuantityFormatter.formatNumber(units) + " items" + (coins > 0 ? " + " + PanelUi.gpPlain(coins) + " coins" : "")
-				+ "  ·  GE value when looted, not money in hand"
 			: "No loot in this range");
 
 		final List<DashboardCharts.Bar> bars = new ArrayList<>();
@@ -493,8 +500,7 @@ class DashboardWindow extends JFrame
 		soldStat.set(drift.isEmpty() ? "—" : PanelUi.gpPlain(net), drift.isEmpty() ? DashboardTheme.MUTED : DashboardTheme.GAIN,
 			drift.isEmpty() ? "Nothing sold or alched in this range"
 				: QuantityFormatter.formatNumber(units) + " items"
-					+ (tax > 0 ? "  ·  after " + PanelUi.gpPlain(tax) + " GE tax" : "")
-					+ "  ·  valued at " + PanelUi.gpPlain(projected) + " when looted");
+					+ (tax > 0 ? "  ·  after " + PanelUi.gpPlain(tax) + " GE tax" : ""));
 		driftChart.setData(bars, drift.isEmpty() ? null : "Overall " + PanelUi.sign(net - projected)
 			+ (projected > 0 ? " (" + signedPct(net - projected, projected) + ")" : ""));
 	}
@@ -631,8 +637,12 @@ class DashboardWindow extends JFrame
 
 	// ------------------------------------------------------------------ layout
 
+	/** The page tabs, with the save status and Refresh on the right - the filter row below is
+	 *  already full at the minimum width. */
 	private JPanel tabRow()
 	{
+		final JPanel bar = new JPanel(new BorderLayout());
+		bar.setOpaque(false);
 		final JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
 		row.setOpaque(false);
 		for (Page p : Page.values())
@@ -646,7 +656,18 @@ class DashboardWindow extends JFrame
 			row.add(tab);
 			row.add(gap(24));
 		}
-		return row;
+		bar.add(row, BorderLayout.WEST);
+
+		final JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+		right.setOpaque(false);
+		saveStatus.setFont(DashboardTheme.font(Font.PLAIN, 12f));
+		saveStatus.setForeground(DashboardTheme.MUTED);
+		saveStatus.setToolTipText("<html>Runs you start are saved when you press Stop.<br>"
+			+ "The always-on run saves itself every few minutes, and when you open a bank.</html>");
+		right.add(saveStatus);
+		right.add(new DashboardTheme.Chip("Refresh", false, onRefresh));
+		bar.add(right, BorderLayout.EAST);
+		return bar;
 	}
 
 	private void showPage(Page p)
@@ -734,15 +755,6 @@ class DashboardWindow extends JFrame
 			left.add(self[0]);
 		}
 		bar.add(left, BorderLayout.CENTER);
-		final JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
-		right.setOpaque(false);
-		saveStatus.setFont(DashboardTheme.font(Font.PLAIN, 12f));
-		saveStatus.setForeground(DashboardTheme.MUTED);
-		saveStatus.setToolTipText("<html>Runs you start are saved when you press Stop.<br>"
-			+ "The always-on run saves itself every few minutes, and when you open a bank.</html>");
-		right.add(saveStatus);
-		right.add(new DashboardTheme.Chip("Refresh", false, onRefresh));
-		bar.add(right, BorderLayout.EAST);
 		return bar;
 	}
 
@@ -761,7 +773,16 @@ class DashboardWindow extends JFrame
 
 	private JPanel table()
 	{
-		final JTable t = new JTable(model);
+		// fills the width when every column fits at its preferred size; narrower than that it
+		// keeps those sizes and scrolls sideways rather than squeezing headers to "GP / ..."
+		final JTable t = new JTable(model)
+		{
+			@Override
+			public boolean getScrollableTracksViewportWidth()
+			{
+				return getParent() == null || getPreferredSize().width <= getParent().getWidth();
+			}
+		};
 		t.setFillsViewportHeight(true);
 		t.setRowHeight(30);
 		t.setShowGrid(false);
@@ -785,8 +806,10 @@ class DashboardWindow extends JFrame
 
 		t.setDefaultRenderer(String.class, new CellRenderer());
 		t.setDefaultRenderer(Long.class, new CellRenderer());
-		t.getColumnModel().getColumn(0).setPreferredWidth(220);
-		t.getColumnModel().getColumn(1).setPreferredWidth(130);
+		for (int c = 0; c < ActivityModel.COLUMNS.length; c++)
+		{
+			t.getColumnModel().getColumn(c).setPreferredWidth(c == 0 ? 190 : c == 1 ? 110 : 92);
+		}
 
 		final JScrollPane sp = new JScrollPane(t);
 		sp.setBorder(BorderFactory.createEmptyBorder());
@@ -966,6 +989,12 @@ class DashboardWindow extends JFrame
 			else
 			{
 				setText(QuantityFormatter.formatNumber(v));
+			}
+			// a gp figure too wide for its column shortens ("984K") rather than clipping ("984,...")
+			final int room = table.getColumnModel().getColumn(col).getWidth() - 24;
+			if (getFontMetrics(getFont()).stringWidth(getText()) > room)
+			{
+				setText(DashboardTheme.compact(getText()));
 			}
 			return this;
 		}
