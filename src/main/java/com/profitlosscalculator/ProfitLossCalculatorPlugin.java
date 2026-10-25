@@ -145,30 +145,6 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  the real death). Awakened variants may need their own name added here. */
 	private static final Set<String> PHASE_DEATH_MOBS = Collections.singleton("the whisperer");
 
-	/**
-	 * Multi-NPC / raid encounters whose only reward is a single shared chest, keyed by the
-	 * chest's {@code LootReceived} source name (verified against RuneLite's own
-	 * {@code LootTrackerPlugin} source, not guessed) -&gt; the Target Farm label a run of it is
-	 * counted against. The client gives no reliable way to attribute a shared chest to which of
-	 * the underlying NPCs actually died (RuneLite's own {@code !kc} chat command treats a chest
-	 * opening as the whole kill count for exactly this content - {@code !kc barrows}, {@code !kc
-	 * lunar chest} - not a count of individual brothers/bosses), so a farm targeting one of these
-	 * labels counts a "kill" the moment its chest is looted rather than off any individual boss's
-	 * {@code ActorDeath} - which for some of them (Perilous Moons) doesn't even fire in a way the
-	 * client can see. See {@link #onLootReceived}. Each label is a plain, atomic entry in
-	 * {@link KnownMobNames} (not a {@code GROUPS} label that expands to sub-names) - farming
-	 * "Moons of Peril" targets this one bucket, not three.
-	 */
-	private static final Map<String, String> CHEST_RUN_LABEL_BY_LOOT_NAME = new LinkedHashMap<>();
-	static
-	{
-		CHEST_RUN_LABEL_BY_LOOT_NAME.put("barrows", "Barrows");
-		CHEST_RUN_LABEL_BY_LOOT_NAME.put("lunar chest", "Moons of Peril");
-		CHEST_RUN_LABEL_BY_LOOT_NAME.put("chambers of xeric", "Chambers of Xeric");
-		CHEST_RUN_LABEL_BY_LOOT_NAME.put("theatre of blood", "Theatre of Blood");
-		CHEST_RUN_LABEL_BY_LOOT_NAME.put("tombs of amascut", "Tombs of Amascut");
-	}
-
 	/** Rune-pouch slots: type (which rune) and quantity, read alongside inv + worn so runes
 	 *  picked up straight into the pouch still count as loot collected. */
 	private static final int[] RUNE_POUCH_TYPE_VARBITS = {
@@ -2044,9 +2020,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		return k;
 	}
 
-	/** Plain-session kill tally for a {@link #PHASE_DEATH_MOBS phase-transition boss}, driven
-	 *  by its loot drop. Debounced against split loot events for the one kill. */
-	private void bumpPhaseDeathKill(String source)
+	/** Plain-session kill tally driven by a loot event - a {@link #PHASE_DEATH_MOBS
+	 *  phase-transition boss}'s drop, or a {@link ChestEncounters shared chest}. Debounced
+	 *  against split loot events for the one kill. */
+	private void bumpKillFromLoot(String source)
 	{
 		final String name = Text.removeTags(source).trim();
 		final int tick = client.getTickCount();
@@ -2135,11 +2112,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		else if (session.isGrouped())
 		{
 			// A shared reward chest (Barrows, Perilous Moons, a raid, ...) - see
-			// CHEST_RUN_LABEL_BY_LOOT_NAME. The chest opening itself is the kill, one per loot
+			// ChestEncounters. The chest opening itself is the kill, one per loot
 			// event, counted (and its loot attributed) only when the farm is actually targeting
 			// that label - anything else stays stray, un-netted income.
-			final String label = CHEST_RUN_LABEL_BY_LOOT_NAME.get(
-				Text.removeTags(source).trim().toLowerCase(Locale.ROOT));
+			final String label = ChestEncounters.labelForChest(Text.removeTags(source));
 			if (label != null && session.matchesTarget(label, slayerTracker))
 			{
 				kill = openKill(label, client.getTickCount(), "chest");
@@ -2150,7 +2126,13 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		{
 			// handleNpcKill ignores this boss's scripted death and a plain session has no loot
 			// bucket to hang the count on - so count the kill here, off the drop.
-			bumpPhaseDeathKill(source);
+			bumpKillFromLoot(source);
+		}
+		else if (!session.isGrouped() && ChestEncounters.labelForChest(Text.removeTags(source)) != null)
+		{
+			// a shared chest is the encounter's kill (as a Targeted farm of it counts it) - the
+			// bosses behind it may never fire a death the client can see
+			bumpKillFromLoot(source);
 		}
 
 		logger.line("loot")
@@ -3623,8 +3605,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				scalar.computeIfAbsent(mob, k -> new long[3])[0] += n;
 			}
 		});
+		// a chest-encounter farm targets the chest's label, never a boss name - the gp spent and
+		// deaths taken fighting its bosses belong to that label, not to "not in combat"
+		final java.util.function.UnaryOperator<String> owner = mob -> keep.test(mob) ? mob
+			: keep.test(ChestEncounters.encounterOf(mob)) ? ChestEncounters.encounterOf(mob) : SessionHistory.UNATTRIBUTED;
 		session.getCostByMob().forEach((mob, gp) ->
-			scalar.computeIfAbsent(keep.test(mob) ? mob : SessionHistory.UNATTRIBUTED, k -> new long[3])[1] += gp);
+			scalar.computeIfAbsent(owner.apply(mob), k -> new long[3])[1] += gp);
 		for (DeathEntry d : session.getDeaths())
 		{
 			if (!d.isCounted())
@@ -3632,8 +3618,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 				continue;
 			}
 			final String rawMob = d.getMob() == null ? SessionHistory.UNATTRIBUTED : d.getMob();
-			final String mob = keep.test(rawMob) ? rawMob : SessionHistory.UNATTRIBUTED;
-			final long[] s = scalar.computeIfAbsent(mob, k -> new long[3]);
+			final long[] s = scalar.computeIfAbsent(owner.apply(rawMob), k -> new long[3]);
 			s[1] += d.getResolvedCost();
 			s[2] += 1;
 		}

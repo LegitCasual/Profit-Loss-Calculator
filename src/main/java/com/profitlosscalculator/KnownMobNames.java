@@ -30,8 +30,7 @@ import java.util.TreeSet;
  *     <li>A handful of plain, atomic entries for encounters whose only reward is a single
  *         shared chest (Barrows, Moons of Peril, the raids) - a real kill of the NPC(s) inside
  *         doesn't drop anything the plugin can see, so these are instead counted the moment
- *         their chest is looted. See {@link ProfitLossCalculatorPlugin}'s
- *         {@code CHEST_RUN_LABEL_BY_LOOT_NAME}.</li>
+ *         their chest is looted. See {@link ChestEncounters}.</li>
  * </ul>
  *
  * <p>{@link #GROUPS} adds a few collective labels for multi-NPC encounters that are genuinely
@@ -51,7 +50,7 @@ final class KnownMobNames
 		// Barrows, Moons of Peril, the raids), which would skew the per-kill numbers if split
 		// across members, or silently count nothing if farmed by any one member's name. Those
 		// are handled a different way entirely: see the plain "Barrows" / "Moons of Peril" /
-		// raid entries below, and ProfitLossCalculatorPlugin's CHEST_RUN_LABEL_BY_LOOT_NAME.
+		// raid entries below, and ChestEncounters.
 		final Map<String, List<String>> g = new LinkedHashMap<>();
 		g.put("Dagannoth Kings", Arrays.asList("Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"));
 		g.put("The Royal Titans", Arrays.asList("Branda the Fire Queen", "Eldric the Ice King"));
@@ -116,7 +115,7 @@ final class KnownMobNames
 			"Zalcano", "Tempoross",
 
 			// --- shared-chest encounters, farmed under one atomic label rather than a GROUPS
-			//     expansion - see ProfitLossCalculatorPlugin's CHEST_RUN_LABEL_BY_LOOT_NAME.
+			//     expansion - see ChestEncounters.
 			//     Raids were previously excluded entirely (their loot comes from a chest, not
 			//     the boss NPC, so a farm of one silently counted nothing) - this is what
 			//     actually fixes that, rather than just documenting it as a known gap. ---

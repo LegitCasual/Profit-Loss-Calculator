@@ -130,7 +130,13 @@ class SessionHistory
 				log.warn("could not read session logs for the dashboard", e);
 				costs = new ArrayList<>();
 			}
-			cb.accept(new DashboardStats.Input(new ArrayList<>(entries), new ArrayList<>(realised), costs));
+			final List<RunRecord> runs = new ArrayList<>(entries.size());
+			for (RunRecord rr : entries)
+			{
+				runs.add(rr == null || rr.getPerMob() == null ? rr : new RunRecord(rr.getSchema(), rr.getKind(),
+					rr.getStart(), rr.getEnd(), rr.getDurationSec(), rr.getValuation(), ChestEncounters.fold(rr.getPerMob())));
+			}
+			cb.accept(new DashboardStats.Input(runs, new ArrayList<>(realised), costs));
 		});
 	}
 
@@ -245,6 +251,7 @@ class SessionHistory
 				entries.clear();
 				readHistoryFile();
 				migrateLegacy();
+				backfillChestKills();
 				realised.clear();
 				readRealisedFile();
 				banked.clear();
@@ -318,7 +325,9 @@ class SessionHistory
 			{
 				if (rr.getPerMob() != null)
 				{
-					rr.getPerMob().remove(mob);
+					// the History row may be a folded chest encounter - drop its bosses and chest too
+					rr.getPerMob().keySet().removeIf(k -> java.util.Objects.equals(k, mob)
+						|| (k != null && mob != null && mob.equals(ChestEncounters.encounterOf(k))));
 				}
 				return rr.getPerMob() == null || rr.getPerMob().isEmpty();
 			});
@@ -923,6 +932,84 @@ class SessionHistory
 			lng(o, "durationSec"), str(o, "valuation"), pm);
 	}
 
+	/**
+	 * Runs recorded before a shared chest's opening counted as a kill (see {@link ChestEncounters})
+	 * have a chest row with loot and no kills. Their session log still has one {@code loot} line
+	 * per opening, so count those back in and save the corrected records. Only logs whose run
+	 * needs it are read past their first line, and a fixed record never asks again.
+	 */
+	private void backfillChestKills() throws IOException
+	{
+		final Map<String, RunRecord> needs = new HashMap<>();   // run start -> record
+		for (RunRecord rr : entries)
+		{
+			if (rr != null && rr.getStart() != null && rr.getPerMob() != null && rr.getPerMob().entrySet().stream()
+				.anyMatch(e -> ChestEncounters.labelForChest(e.getKey()) != null && e.getValue() != null
+					&& e.getValue().getKills() == 0 && e.getValue().getDropped() > 0))
+			{
+				needs.put(rr.getStart(), rr);
+			}
+		}
+		if (needs.isEmpty())
+		{
+			return;
+		}
+		final List<Path> logs;
+		try (Stream<Path> st = Files.list(dir()))
+		{
+			logs = st.filter(p ->
+			{
+				final String n = p.getFileName().toString();
+				return n.startsWith("session-") && n.endsWith(".jsonl");
+			}).collect(Collectors.toList());
+		}
+		boolean changed = false;
+		for (Path p : logs)
+		{
+			final String head;
+			try (Stream<String> ls = Files.lines(p, StandardCharsets.UTF_8))
+			{
+				head = ls.findFirst().orElse(null);
+			}
+			final JsonObject first = head == null ? null : asObject(head);
+			final RunRecord rr = "session_start".equals(str(first, "event")) ? needs.get(str(first, "startedAt")) : null;
+			if (rr == null)
+			{
+				continue;
+			}
+			for (Map.Entry<String, Integer> e : chestOpens(Files.readAllLines(p, StandardCharsets.UTF_8)).entrySet())
+			{
+				final RunRecord.MobRun mr = rr.getPerMob().get(e.getKey());
+				if (mr != null && mr.getKills() == 0)
+				{
+					rr.getPerMob().put(e.getKey(), new RunRecord.MobRun(e.getValue(), mr.getGained(), mr.getDropped(),
+						mr.getCost(), mr.getDeaths(), mr.getItems()));
+					changed = true;
+				}
+			}
+		}
+		if (changed)
+		{
+			rewrite();
+		}
+	}
+
+	/** Chest source -&gt; how many times it was opened, from a session log's {@code loot} lines. */
+	static Map<String, Integer> chestOpens(List<String> logLines)
+	{
+		final Map<String, Integer> opens = new HashMap<>();
+		for (String line : logLines)
+		{
+			final JsonObject o = asObject(line);
+			final String source = str(o, "source");
+			if ("loot".equals(str(o, "event")) && ChestEncounters.labelForChest(source) != null)
+			{
+				opens.merge(source.trim(), 1, Integer::sum);
+			}
+		}
+		return opens;
+	}
+
 	private void migrateLegacy() throws IOException
 	{
 		final Set<String> known = new HashSet<>();
@@ -1099,7 +1186,7 @@ class SessionHistory
 			{
 				continue;
 			}
-			e.getPerMob().forEach((name, mr) ->
+			ChestEncounters.fold(e.getPerMob()).forEach((name, mr) ->
 			{
 				if (mr == null)
 				{
