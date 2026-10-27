@@ -283,12 +283,23 @@ class ProfitLossCalculatorPanel extends PluginPanel
 			}
 		});
 
+		// Bug-report link in the nav bar on every tab (modes and History alike), so it outlives
+		// the first-run screen that used to be its only home. Sits up here rather than in a
+		// SOUTH footer, which got pinned to the bottom of the full-height sidebar.
+		final JButton reportIssue = new JButton("Report an issue / suggest a feature");
+		reportIssue.setFocusPainted(false);
+		reportIssue.setFont(FontManager.getRunescapeSmallFont());
+		reportIssue.setToolTipText("Opens the plugin's GitHub issues page");
+		reportIssue.addActionListener(e -> LinkBrowser.browse(WelcomeContent.ISSUES_URL));
+
 		final JPanel navBar = new JPanel();
 		navBar.setLayout(new BoxLayout(navBar, BoxLayout.Y_AXIS));
 		navBar.setBorder(BorderFactory.createEmptyBorder(8, 10, 4, 10));
 		navBar.add(PanelUi.stretch(historyBtn));
 		navBar.add(PanelUi.vgap(4));
 		navBar.add(PanelUi.stretch(modeSelector));
+		navBar.add(PanelUi.vgap(4));
+		navBar.add(PanelUi.stretch(reportIssue));
 
 		modeHost.add(sessionContent, MODE_SESSION);
 		modeHost.add(targetedContent, MODE_TARGETED);
@@ -298,20 +309,8 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		bodyHost.add(modeHost, CARD_MODES);
 		bodyHost.add(historyContent, CARD_HISTORY);
 
-		// Bug-report link under every tab (modes and History alike), so it outlives the
-		// first-run screen that used to be its only home.
-		final JButton reportIssue = new JButton("Report an issue / suggest a feature");
-		reportIssue.setFocusPainted(false);
-		reportIssue.setFont(FontManager.getRunescapeSmallFont());
-		reportIssue.setToolTipText("Opens the plugin's GitHub issues page");
-		reportIssue.addActionListener(e -> LinkBrowser.browse(WelcomeContent.ISSUES_URL));
-		final JPanel footer = new JPanel(new BorderLayout());
-		footer.setBorder(BorderFactory.createEmptyBorder(12, 10, 10, 10));
-		footer.add(reportIssue, BorderLayout.CENTER);
-
 		contentHost.add(navBar, BorderLayout.NORTH);
 		contentHost.add(bodyHost, BorderLayout.CENTER);
-		contentHost.add(footer, BorderLayout.SOUTH);
 
 		switch (startNotice)
 		{
