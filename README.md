@@ -91,8 +91,10 @@ All prices are live GE prices.
 
 - **Food and potions** - charged per bite or dose that actually leaves your inventory, not per
   click. With *Dose-aware potion cost* on, each sip costs one dose's worth.
-- **Spells** - the standard spellbook and Ancient combat spells, minus any runes your staff or
-  tome supplies. Manual casts only.
+- **Spells** - all four spellbooks (Standard, Ancient, Lunar and Arceuus - thralls and jewellery
+  enchants included), minus any runes your staff or tome supplies. Manual casts only. A cast is
+  charged once its runes actually leave your inventory or rune pouch, so a click the game refuses
+  (Vengeance on cooldown, a thrall already out) or a Kodai wand's free cast costs nothing.
 - **Teleports** - jewellery charges (glory, ring of dueling, games necklace, ...) and
   teleport tablets or scrolls.
 - **Ammo** - arrows, bolts, darts, thrown weapons, chinchompas and cannonballs. Ava's
@@ -168,8 +170,7 @@ Both are off by default.
 
 **Tracking**
 - Only **manually cast** spells are counted - autocast spells show no rune cost.
-- Not priced: Ancient teleports, the Lunar and Arceuus spellbooks, Enchant spells, and the
-  Kodai wand's rune-saving chance.
+- Not priced: Enchant Crossbow Bolt.
 - Runes in your rune pouch are charged in full for spells - only an equipped staff or tome
   removes runes from the bill.
 - Charged weapons other than the Venator bow, Eye of Ayak and Tumeken's shadow (blowpipe,

@@ -35,10 +35,10 @@ import net.runelite.client.util.LinkBrowser;
 class WhatsNewContent extends JPanel
 {
 	/** The release these notes belong to - shown on the screen, and what "seen" is keyed on. */
-	static final String VERSION = "0.3";
+	static final String VERSION = "0.4";
 
 	/** Display only. */
-	static final String RELEASE_DATE = "25 Oct 2026";
+	static final String RELEASE_DATE = "27 Oct 2026";
 
 	/** True unless {@code confirmedVersion} (the version last OK'd; blank = never) is this one. */
 	static boolean isUnseen(String confirmedVersion)
@@ -48,20 +48,20 @@ class WhatsNewContent extends JPanel
 
 	/** Player-facing, one short line each - the panel is ~215px wide. */
 	static final List<String> NOTES = Collections.unmodifiableList(Arrays.asList(
-		"<b>New: History dashboard.</b> Hit <b>Open dashboard</b> on the History tab for charts of "
-			+ "your profit over time and your best and worst activities, in a window you can put "
-			+ "on a second screen.",
-		"Pick a date range, and include or leave out combat, skilling and time out of combat.",
-		"<b>Loot</b> shows what your loot is made of, and whether what you sold went for more or "
-			+ "less than it was worth when you looted it.",
-		"<b>Costs</b> shows where your gp goes - deaths, supplies, spells, teleports - and which "
-			+ "activities cost the most.",
-		"gp / hr only shows for runs spent on one activity for now. Full gp / hr is coming."
+		"<b>New: every spellbook.</b> Ancient, Lunar and Arceuus spells now count as costs - "
+			+ "thralls, Vengeance, teleports and more.",
+		"Standard spells that were missing are in too, including jewellery enchants.",
+		"A spell is only charged once its runes are used, so a cast the game refuses costs "
+			+ "nothing.",
+		"Runes in your rune pouch are counted the same as runes in your inventory.",
+		"If a spell isn't counted or costs the wrong amount, please raise an issue on GitHub "
+			+ "with the spell's name.",
+		"The <b>Report an issue</b> button is now at the top of every tab."
 	));
 
 	/** Optional sign-off under the notes - {@code null} to leave it out for a release. */
-	static final String THANKS = "300+ of you have decided to not only try this plugin, but are "
-		+ "actively using it (or haven't disabled it) - and for that, thank you.";
+	static final String THANKS = "400+ of you are now using this plugin. I'm really thankful to "
+		+ "everyone who has shared it around - please keep the feedback coming in :)";
 
 	private static final Color OK_GREEN = new Color(92, 143, 100);
 	/** Brighter than ColorScheme.LIGHT_GRAY_COLOR - this screen is meant to be read. */

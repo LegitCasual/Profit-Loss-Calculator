@@ -26,6 +26,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
+import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.ActorSpotAnim;
@@ -251,6 +252,23 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	// cast claims the next drop so it isn't charged twice.
 	private int lastMagicXp = -1;
 	private int manualCastTick = -1;
+	// a manual cast is charged when its runes actually leave (inv / worn / pouch), not on the
+	// click - a click the game refuses (Vengeance on cooldown, a thrall already out, too few
+	// runes) spends nothing. recordCast arms one of these; onGameTick confirms it against that
+	// tick's real losses (see RuneSpend) or lets it lapse.
+	private final List<PendingCast> pendingCasts = new ArrayList<>();
+	/** How many ticks after a cast click its runes may still leave - a combat spell on a far
+	 *  target waits for the walk into range, same allowance as its XP drop. */
+	private static final int SPELL_CONFIRM_TICKS = MANUAL_CAST_XP_TICKS;
+
+	@Value
+	private static class PendingCast
+	{
+		/** priced at the click, against the staff / tome worn then */
+		SpellCostService.Priced priced;
+		int targetItemId;
+		int tick;
+	}
 
 	// consumables are charged on the inventory drop that follows an Eat/Drink click, not on
 	// the click itself - spam-clicking "Drink" fires many MenuOptionClicked but only one dose
@@ -922,6 +940,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		dropIntent.clear();
 		droppedOut.clear();
 		alchCredited.clear();
+		pendingCasts.clear();
 		pendingBankMoves.clear();
 		pendingAlch.clear();
 		pendingAlchMob.clear();
@@ -1551,6 +1570,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			// when the ice is broken) is neither a loss nor loot - drop it from both sides before
 			// anything downstream can claim it
 			blueMoonFreeze.filter(losses, gains);
+			// a cast's runes leaving is what confirms it - claim them before anything below
+			// (drops, skilling materials) can read them as something else
+			confirmCasts(losses);
 			trackDrops(losses);
 			// a food / potion that actually left the inventory after an Eat/Drink click - the
 			// real "you consumed one" signal, as opposed to how many times the button was hit.
@@ -1570,6 +1592,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		prevTickItems = curItems;
 		lootCollector.expire(client.getTickCount());
+		expireCasts();
 
 		if (deathWindowTicks > 0)
 		{
@@ -2994,7 +3017,52 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		lastCastTick = tick;
 		lastCastComponent = componentId;
-		chargeSpell(spell, targetItemId, false);
+		final SpellCostService.Priced priced = spellCostService.price(spell);
+		if (priced.getRunesUsed().isEmpty())
+		{
+			// every rune came from the staff - nothing will leave to confirm it by, and it's free
+			chargeSpell(priced, targetItemId, false);
+			return;
+		}
+		pendingCasts.add(new PendingCast(priced, targetItemId, tick));
+	}
+
+	/** Charge each armed cast whose runes left this tick, oldest click first - each claims its
+	 *  own runes out of {@code losses}, so two casts in one tick can't pay with the same ones. */
+	private void confirmCasts(Map<Integer, Integer> losses)
+	{
+		if (pendingCasts.isEmpty() || losses.isEmpty())
+		{
+			return;
+		}
+		final java.util.Iterator<PendingCast> it = pendingCasts.iterator();
+		while (it.hasNext())
+		{
+			final PendingCast c = it.next();
+			if (RuneSpend.claim(c.getPriced().getRunesUsed(), losses))
+			{
+				it.remove();
+				chargeSpell(c.getPriced(), c.getTargetItemId(), false);
+			}
+		}
+	}
+
+	/** Drop armed casts whose runes never left - the game didn't cast them. */
+	private void expireCasts()
+	{
+		final int now = client.getTickCount();
+		pendingCasts.removeIf(c ->
+		{
+			if (now - c.getTick() <= SPELL_CONFIRM_TICKS)
+			{
+				return false;
+			}
+			logger.line("spell_unconfirmed")
+				.put("spell", c.getPriced().getSpell().getDisplayName())
+				.put("gp", c.getPriced().getGp())
+				.submit();
+			return true;
+		});
 	}
 
 	/** A magic XP gain - when it isn't a manual cast's, it's one autocast (splashes give XP
@@ -3015,7 +3083,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final Spell spell = autocastSpell();
 		if (spell != null)
 		{
-			chargeSpell(spell, -1, true);
+			chargeSpell(spellCostService.price(spell), -1, true);
 		}
 	}
 
@@ -3053,9 +3121,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		return spell;
 	}
 
-	private void chargeSpell(Spell spell, int targetItemId, boolean autocast)
+	private void chargeSpell(SpellCostService.Priced priced, int targetItemId, boolean autocast)
 	{
-		final SpellCostService.Priced priced = spellCostService.price(spell);
+		final Spell spell = priced.getSpell();
 		session.add(new CostEvent(CostEvent.Type.SPELL, Instant.now(),
 			-1, 1, priced.getGp(), spell.getDisplayName() + (autocast ? " (autocast)" : ""),
 			priced.getBreakdown()));

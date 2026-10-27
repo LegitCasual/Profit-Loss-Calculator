@@ -9,7 +9,7 @@ import lombok.RequiredArgsConstructor;
 import net.runelite.api.gameval.ItemID;
 
 /**
- * The elemental / catalytic runes used by standard-spellbook spells, mapped to the
+ * The elemental / catalytic runes used by spellbook spells, mapped to the
  * item id whose GE price represents one rune.
  */
 @Getter
@@ -29,7 +29,8 @@ enum Rune
 	NATURE("Nature", ItemID.NATURERUNE),
 	LAW("Law", ItemID.LAWRUNE),
 	SOUL("Soul", ItemID.SOULRUNE),
-	WRATH("Wrath", ItemID.WRATHRUNE);
+	WRATH("Wrath", ItemID.WRATHRUNE),
+	ASTRAL("Astral", ItemID.ASTRALRUNE);
 
 	private final String displayName;
 	private final int itemId;

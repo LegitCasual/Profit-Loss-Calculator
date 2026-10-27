@@ -137,6 +137,55 @@ public class SpellCostServiceTest
 	}
 
 	@Test
+	public void thrallClickResolvesAndChargesItsRunes()
+	{
+		price(Rune.FIRE, 5);
+		price(Rune.BLOOD, 300);
+		price(Rune.COSMIC, 100);
+		Spell spell = Spell.byComponent(net.runelite.api.gameval.InterfaceID.MagicSpellbook.RESURRECT_GREATER_GHOST);
+		assertSame(Spell.RESURRECT_GREATER_GHOST, spell);
+		SpellCostService.Priced p = SpellCostService.price(spell, EnumSet.noneOf(Rune.class), ge);
+		// 10 fire * 5 + 5 blood * 300 + 1 cosmic * 100
+		assertEquals(50 + 1500 + 100, p.getGp());
+		assertEquals(Integer.valueOf(5), p.getRunesUsed().get(Rune.BLOOD));
+	}
+
+	@Test
+	public void fireStaffFreesFireOnGreaterThrall()
+	{
+		price(Rune.FIRE, 5);
+		price(Rune.BLOOD, 300);
+		price(Rune.COSMIC, 100);
+		SpellCostService.Priced p = SpellCostService.price(Spell.RESURRECT_GREATER_SKELETON, Staff.FIRE.getRunes(), ge);
+		assertEquals(1500 + 100, p.getGp());
+		assertNull(p.getRunesUsed().get(Rune.FIRE));
+	}
+
+	@Test
+	public void vengeanceChargesAstralRunes()
+	{
+		price(Rune.EARTH, 5);
+		price(Rune.ASTRAL, 150);
+		price(Rune.DEATH, 200);
+		Spell spell = Spell.byComponent(net.runelite.api.gameval.InterfaceID.MagicSpellbook.VENGEANCE);
+		assertSame(Spell.VENGEANCE, spell);
+		SpellCostService.Priced p = SpellCostService.price(spell, EnumSet.noneOf(Rune.class), ge);
+		// 10 earth * 5 + 4 astral * 150 + 2 death * 200
+		assertEquals(50 + 600 + 400, p.getGp());
+		assertEquals(Integer.valueOf(4), p.getRunesUsed().get(Rune.ASTRAL));
+	}
+
+	@Test
+	public void ancientTeleportResolvesByComponent()
+	{
+		assertSame(Spell.GHORROCK_TELEPORT,
+			Spell.byComponent(net.runelite.api.gameval.InterfaceID.MagicSpellbook.ZAROSTELEPORT8));
+		price(Rune.WATER, 5);
+		price(Rune.LAW, 100);
+		assertEquals(40 + 200, SpellCostService.price(Spell.GHORROCK_TELEPORT, EnumSet.noneOf(Rune.class), ge).getGp());
+	}
+
+	@Test
 	public void staffLookupByItemId()
 	{
 		assertSame(Staff.AIR, Staff.byItemId(Staff.AIR.getItemIds()[0]));
@@ -171,6 +220,18 @@ public class SpellCostServiceTest
 			Spell prev = seen.put(s.getComponentId(), s);
 			assertNull("duplicate component for " + s + " / " + prev, prev);
 			assertTrue("empty rune table for " + s, !s.getRunes().isEmpty());
+		}
+	}
+
+	@Test
+	public void everySpellNameIsUnique()
+	{
+		// byName resolves autocasts - two spells sharing a name would price the wrong one
+		Map<String, Spell> seen = new HashMap<>();
+		for (Spell s : Spell.values())
+		{
+			Spell prev = seen.put(s.getDisplayName().toLowerCase(), s);
+			assertNull("duplicate name for " + s + " / " + prev, prev);
 		}
 	}
 }

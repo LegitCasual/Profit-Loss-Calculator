@@ -1,0 +1,201 @@
+# Spell rune costs straight from the OSRS game cache - one row per spell obj (an obj with
+# param 596 SPELL_BUTTON). Columns: spellbook button component, spellbook (param 336: 0 Standard,
+# 1 Ancient, 2 Lunar, 3 Arceuus), name (param 601), requirement item:qty pairs (params 365/366,
+# 367/368, 369/370, 606/607 - runes plus any required non-rune item, e.g. a god staff).
+# Read by SpellCacheTest. Regenerate from a fresh cache when Jagex changes a spell.
+14286852	-1	Back	
+14286853	0	Kourend Home Teleport	
+14286854	0	Lumbridge Home Teleport	
+14286855	0	Minigame Teleport	
+14286856	1	Minigame Teleport	
+14286857	3	Minigame Teleport	
+14286858	2	Minigame Teleport	
+14286859	0	Wind Strike	558:1,556:1
+14286860	0	Confuse	559:1,555:3,557:2
+14286861	0	Crossbow Bolt Enchantments	
+14286862	0	Water Strike	558:1,555:1,556:1
+14286863	0	Jewellery Enchantments	
+14286864	0	Lvl-1 Enchant	564:1,555:1
+14286865	0	Earth Strike	558:1,557:2,556:1
+14286866	0	Weaken	559:1,555:3,557:2
+14286867	0	Fire Strike	558:1,554:3,556:2
+14286868	0	Bones to Bananas	561:1,555:2,557:2
+14286869	0	Wind Bolt	562:1,556:2
+14286870	0	Curse	559:1,555:2,557:3
+14286871	0	Bind	561:2,555:3,557:3
+14286872	0	Low Level Alchemy	561:1,554:3
+14286873	0	Water Bolt	562:1,555:2,556:2
+14286874	0	Varrock Teleport	563:1,556:3,554:1
+14286875	0	Lvl-2 Enchant	564:1,556:3
+14286876	0	Earth Bolt	562:1,557:3,556:2
+14286877	0	Lumbridge Teleport	563:1,556:3,557:1
+14286878	0	Telekinetic Grab	563:1,556:1
+14286879	0	Fire Bolt	562:1,554:4,556:3
+14286880	0	Falador Teleport	563:1,556:3,555:1
+14286881	0	Crumble Undead	562:1,557:2,556:2
+14286882	0	Teleport to House	563:1,556:1,557:1
+14286883	0	Wind Blast	560:1,556:3
+14286884	0	Superheat Item	561:1,554:4
+14286885	0	Camelot Teleport	563:1,556:5
+14286886	0	Water Blast	560:1,555:3,556:3
+14286887	0	Kourend Castle Teleport	563:2,555:1,554:1
+14286888	0	Lvl-3 Enchant	564:1,554:5
+14286889	0	Iban Blast	1409:1,560:1,554:5
+14286890	0	Snare	561:3,555:4,557:4
+14286891	0	Magic Dart	4170:1,560:1,558:4
+14286892	0	Ardougne Teleport	563:2,555:2
+14286893	0	Earth Blast	560:1,557:4,556:3
+14286894	0	Civitas illa Fortis Teleport	563:2,557:1,554:1
+14286895	0	High Level Alchemy	561:1,554:5
+14286896	0	Charge Water Orb	564:3,555:30,567:1
+14286897	0	Lvl-4 Enchant	564:1,557:10
+14286898	0	Watchtower Teleport	563:2,557:2
+14286899	0	Fire Blast	560:1,554:5,556:4
+14286900	0	Charge Earth Orb	564:3,557:30,567:1
+14286901	0	Bones to Peaches	561:2,555:4,557:4
+14286902	0	Saradomin Strike	2415:1,565:2,556:4,554:2
+14286903	0	Claws of Guthix	8843:1,565:2,556:4,554:1
+14286904	0	Flames of Zamorak	2417:1,565:2,556:1,554:4
+14286905	0	Trollheim Teleport	563:2,554:2
+14286906	0	Wind Wave	565:1,556:5
+14286907	0	Charge Fire Orb	564:3,554:30,567:1
+14286908	0	Ape Atoll Teleport	563:2,555:2,554:2,1963:1
+14286909	0	Water Wave	565:1,555:7,556:5
+14286910	0	Charge Air Orb	564:3,556:30,567:1
+14286911	0	Vulnerability	566:1,555:5,557:5
+14286912	0	Lvl-5 Enchant	564:1,555:15,557:15
+14286913	0	Earth Wave	565:1,557:7,556:5
+14286914	0	Enfeeble	566:1,555:8,557:8
+14286915	0	Teleother Lumbridge	563:1,566:1,557:1
+14286916	0	Fire Wave	565:1,554:7,556:5
+14286917	0	Entangle	561:4,555:5,557:5
+14286918	0	Stun	566:1,555:12,557:12
+14286919	0	Charge	565:3,556:3,554:3
+14286920	0	Wind Surge	21880:1,556:7
+14286921	0	Teleother Falador	563:1,566:1,555:1
+14286922	0	Water Surge	21880:1,555:10,556:7
+14286923	0	Tele Block	563:1,560:1,562:1
+14286924	-1	Teleport to Target	563:1,560:1,562:1
+14286925	0	Lvl-6 Enchant	564:1,557:20,554:20
+14286926	0	Teleother Camelot	563:1,566:2
+14286927	0	Earth Surge	21880:1,557:10,556:7
+14286928	0	Lvl-7 Enchant	564:1,566:20,565:20
+14286929	0	Fire Surge	21880:1,554:10,556:7
+14286930	0	Summon Boat	563:2,557:1,555:1
+14286931	0	Teleport to Boat	563:2,557:2,555:2
+14286932	1	Ice Rush	560:2,562:2,555:2
+14286933	1	Ice Blitz	560:2,565:2,555:3
+14286934	1	Ice Burst	560:2,562:4,555:4
+14286935	1	Ice Barrage	560:4,565:2,555:6
+14286936	1	Blood Rush	560:2,562:2,565:1
+14286937	1	Blood Blitz	560:2,565:4
+14286938	1	Blood Burst	560:2,562:4,565:2
+14286939	1	Blood Barrage	560:4,565:4,566:1
+14286940	1	Smoke Rush	560:2,562:2,556:1,554:1
+14286941	1	Smoke Blitz	560:2,565:2,556:2,554:2
+14286942	1	Smoke Burst	560:2,562:4,556:2,554:2
+14286943	1	Smoke Barrage	560:4,565:2,556:4,554:4
+14286944	1	Shadow Rush	560:2,562:2,566:1,556:1
+14286945	1	Shadow Blitz	560:2,565:2,566:2,556:2
+14286946	1	Shadow Burst	560:2,562:4,566:2,556:1
+14286947	1	Shadow Barrage	560:4,565:2,566:3,556:4
+14286948	1	Paddewwa Teleport	563:2,556:1,554:1
+14286949	1	Senntisten Teleport	563:2,566:1
+14286950	1	Kharyrll Teleport	563:2,565:1
+14286951	1	Lassar Teleport	563:2,555:4
+14286952	1	Dareeyak Teleport	563:2,556:2,554:3
+14286953	1	Carrallanger Teleport	563:2,566:2
+14286954	1	Annakarl Teleport	563:2,565:2
+14286955	1	Ghorrock Teleport	563:2,555:8
+14286956	1	Edgeville Home Teleport	
+14286957	2	Lunar Home Teleport	
+14286958	2	Bake Pie	9075:1,555:4,554:5
+14286959	2	Cure Plant	9075:1,557:8
+14286960	2	Monster Examine	9075:1,564:1,558:1
+14286961	2	Astral Contact	9075:1,564:1,556:2
+14286962	2	Cure Other	9075:1,563:1,557:10
+14286963	2	Humidify	9075:1,555:3,554:1
+14286964	2	Moonclan Teleport	563:1,9075:2,557:2
+14286965	2	Tele Group Moonclan	563:1,9075:2,557:4
+14286966	2	Cure Me	9075:2,564:2,563:1
+14286967	2	Hunter Kit	9075:2,557:2
+14286968	2	Waterbirth Teleport	563:1,9075:2,555:1
+14286969	2	Tele Group Waterbirth	563:1,9075:2,555:5
+14286970	2	Cure Group	9075:2,564:2,563:2
+14286971	2	Stat Spy	9075:2,564:2,559:5
+14286972	2	Barbarian Teleport	563:2,9075:2,554:3
+14286973	2	Tele Group Barbarian	563:2,9075:2,554:6
+14286974	2	Superglass Make	9075:2,554:6,556:10
+14286975	2	Tan Leather	9075:2,561:1,554:5
+14286976	2	Khazard Teleport	563:2,9075:2,555:4
+14286977	2	Tele Group Khazard	563:2,9075:2,555:8
+14286978	2	Dream	9075:2,564:1,559:5
+14286979	2	String Jewellery	9075:2,555:5,557:10
+14286980	2	Stat Restore Pot Share	9075:2,555:10,557:10
+14286981	2	Magic Imbue	9075:2,555:7,554:7
+14286982	2	Fertile Soil	9075:3,561:2,557:15
+14286983	2	Boost Potion Share	9075:3,555:10,557:12
+14286984	2	Fishing Guild Teleport	563:3,9075:3,555:10
+14286985	2	Tele Group Fishing Guild	563:3,9075:3,555:14
+14286986	2	Plank Make	9075:2,561:1,557:15
+14286987	2	Catherby Teleport	563:3,9075:3,555:10
+14286988	2	Tele Group Catherby	563:3,9075:3,555:15
+14286989	2	Recharge Dragonstone	9075:1,566:1,555:4
+14286990	2	Ice Plateau Teleport	563:3,9075:3,555:8
+14286991	2	Tele Group Ice Plateau	563:3,9075:3,555:16
+14286992	2	Energy Transfer	9075:3,563:2,561:1
+14286993	2	Heal Other	9075:3,563:3,565:1
+14286994	2	Vengeance Other	9075:3,560:2,557:10
+14286995	2	Vengeance	9075:4,560:2,557:10
+14286996	2	Heal Group	9075:4,563:6,565:3
+14286997	2	Spellbook Swap	9075:3,564:2,563:1
+14286998	2	Geomancy	9075:3,561:3,557:8
+14286999	2	Spin Flax	9075:1,561:2,556:5
+14287000	2	Ourania Teleport	563:1,9075:2,557:6
+14287001	3	Arceuus Home Teleport	
+14287002	3	Basic Reanimation	559:4,561:2
+14287003	3	Arceuus Library Teleport	563:1,557:2
+14287004	3	Adept Reanimation	559:4,561:3,566:1
+14287005	3	Expert Reanimation	565:1,561:3,566:2
+14287006	3	Master Reanimation	565:2,561:4,566:4
+14287007	3	Draynor Manor Teleport	563:1,555:1,557:1
+14287009	3	Mind Altar Teleport	563:1,558:2
+14287010	3	Respawn Teleport	563:1,566:1
+14287011	3	Salve Graveyard Teleport	563:1,566:2
+14287012	3	Fenkenstrain's Castle Teleport	563:1,566:1,557:1
+14287013	3	West Ardougne Teleport	563:2,566:2
+14287014	3	Harmony Island Teleport	563:1,566:1,561:1
+14287015	3	Cemetery Teleport	563:1,566:1,565:1
+14287016	3	Resurrect Crops	566:8,561:12,565:8,557:25
+14287017	3	Barrows Teleport	563:2,566:2,565:1
+14287018	3	Ape Atoll Teleport	563:2,566:2,565:2
+14287019	3	Battlefront Teleport	563:1,557:1,554:1
+14287020	3	Inferior Demonbane	562:1,554:3
+14287021	3	Superior Demonbane	566:1,554:5
+14287022	3	Dark Demonbane	566:2,554:7
+14287023	3	Mark of Darkness	566:1,564:1
+14287024	3	Ghostly Grasp	562:1,556:4
+14287025	3	Skeletal Grasp	560:1,557:8
+14287026	3	Undead Grasp	565:1,554:12
+14287027	3	Ward of Arceuus	566:4,561:2,564:1
+14287028	3	Lesser Corruption	560:1,566:2
+14287029	3	Greater Corruption	565:1,566:3
+14287030	3	Demonic Offering	566:1,21880:1
+14287031	3	Sinister Offering	565:1,21880:1
+14287032	3	Degrime	557:4,561:2
+14287033	3	Shadow Veil	557:5,554:5,564:5
+14287034	3	Vile Vigour	566:1,556:3
+14287035	3	Dark Lure	560:1,561:1
+14287036	3	Death Charge	560:1,565:1,566:1
+14287037	3	Resurrect Lesser Ghost	558:5,556:10,564:1
+14287038	3	Resurrect Lesser Skeleton	558:5,556:10,564:1
+14287039	3	Resurrect Lesser Zombie	558:5,556:10,564:1
+14287040	3	Resurrect Superior Ghost	560:5,557:10,564:1
+14287041	3	Resurrect Superior Skeleton	560:5,557:10,564:1
+14287042	3	Resurrect Superior Zombie	560:5,557:10,564:1
+14287043	3	Resurrect Greater Ghost	565:5,554:10,564:1
+14287044	3	Resurrect Greater Skeleton	565:5,554:10,564:1
+14287045	3	Resurrect Greater Zombie	565:5,554:10,564:1
+14287046	0	Monster Inspect	559:2,558:2
+14287047	0	Alchemic Divergence	
+14287048	0	Alchemic Convergence	
