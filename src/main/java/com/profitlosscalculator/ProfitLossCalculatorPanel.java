@@ -6,16 +6,23 @@ package com.profitlosscalculator;
 
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
+import java.awt.Color;
+import java.awt.Cursor;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.SwingConstants;
 import lombok.Builder;
 import lombok.Singular;
 import lombok.Value;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.LinkBrowser;
@@ -37,6 +44,9 @@ import net.runelite.client.util.LinkBrowser;
  * The History button swaps the whole mode view out for the lifetime, per-mob record of every
  * run (see {@link HistoryContent}); clicking it again ("◀  Back") returns to whichever mode
  * was selected. Only one run (session, farm or Slayer task) is active at a time.
+ *
+ * <p>A red "Needs review" box sits at the top of the nav bar whenever a death is waiting for
+ * an approve / deny (see {@link ReviewContent}), and is hidden entirely when nothing is.
  */
 class ProfitLossCalculatorPanel extends PluginPanel
 {
@@ -62,6 +72,10 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		void onConfirmDeath(int deathId, long fee);
 
 		void onGravestone(int deathId);
+
+		/** Needs review: the player's verdict on a full-loss death. Approve keeps the charge;
+		 *  Deny lowers it to {@code fee} (the items came back from the grave). */
+		void onReviewDeath(DeathReviews.Review review, boolean approved, long fee);
 
 		/** Wipe history.jsonl and the detail logs (the panel confirms with the user first). */
 		void onClearHistory();
@@ -236,6 +250,8 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	private static final String MODE_ITEMS = "Items";
 	private static final String CARD_MODES = "modes";
 	private static final String CARD_HISTORY = "history";
+	private static final String CARD_REVIEW = "review";
+	private static final Color REVIEW_BG = new Color(120, 30, 30);
 
 	private final Controls controls;
 
@@ -245,13 +261,17 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	private final JPanel modeHost = new JPanel(modeLayout);
 	private final CardLayout bodyLayout = new CardLayout();
 	private final JPanel bodyHost = new JPanel(bodyLayout);
-	private boolean showingHistory;
+	/** The body card on show: {@link #CARD_MODES}, {@link #CARD_HISTORY} or {@link #CARD_REVIEW}. */
+	private String card = CARD_MODES;
+	private final JLabel reviewBox = new JLabel("", SwingConstants.CENTER);
+	private int reviewCount;
 
 	private final SessionContent sessionContent;
 	private final TargetedContent targetedContent;
 	private final SlayerContent slayerContent;
 	private final HistoryContent historyContent;
 	private final ItemsContent itemsContent;
+	private final ReviewContent reviewContent;
 
 	/** Holds the nav bar + body. Swapped out for {@link #notice} on first run / after an update. */
 	private final JPanel contentHost = new JPanel(new BorderLayout());
@@ -266,11 +286,30 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		this.slayerContent = new SlayerContent(controls, itemManager);
 		this.historyContent = new HistoryContent(controls, itemManager);
 		this.itemsContent = new ItemsContent(itemManager);
+		this.reviewContent = new ReviewContent(controls);
 
 		setLayout(new BorderLayout());
 
 		historyBtn.setFocusPainted(false);
 		historyBtn.addActionListener(e -> toggleHistory());
+
+		reviewBox.setOpaque(true);
+		reviewBox.setBackground(REVIEW_BG);
+		reviewBox.setForeground(Color.WHITE);
+		reviewBox.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(ColorScheme.PROGRESS_ERROR_COLOR),
+			BorderFactory.createEmptyBorder(5, 6, 5, 6)));
+		reviewBox.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		reviewBox.setToolTipText("Deaths charged as a full loss - approve or deny each one");
+		reviewBox.setVisible(false);
+		reviewBox.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				showCard(CARD_REVIEW);
+			}
+		});
 
 		modeSelector.setFocusable(false);
 		modeSelector.addActionListener(e ->
@@ -295,6 +334,8 @@ class ProfitLossCalculatorPanel extends PluginPanel
 		final JPanel navBar = new JPanel();
 		navBar.setLayout(new BoxLayout(navBar, BoxLayout.Y_AXIS));
 		navBar.setBorder(BorderFactory.createEmptyBorder(8, 10, 4, 10));
+		navBar.add(PanelUi.stretch(reviewBox));
+		navBar.add(PanelUi.vgap(4));
 		navBar.add(PanelUi.stretch(historyBtn));
 		navBar.add(PanelUi.vgap(4));
 		navBar.add(PanelUi.stretch(modeSelector));
@@ -308,6 +349,7 @@ class ProfitLossCalculatorPanel extends PluginPanel
 
 		bodyHost.add(modeHost, CARD_MODES);
 		bodyHost.add(historyContent, CARD_HISTORY);
+		bodyHost.add(reviewContent, CARD_REVIEW);
 
 		contentHost.add(navBar, BorderLayout.NORTH);
 		contentHost.add(bodyHost, BorderLayout.CENTER);
@@ -333,14 +375,38 @@ class ProfitLossCalculatorPanel extends PluginPanel
 	 *  {@link #dismissNotice} uses for the first-run screen. */
 	private void toggleHistory()
 	{
-		showingHistory = !showingHistory;
-		historyBtn.setText(showingHistory ? "◀  Back" : "History");
-		modeSelector.setVisible(!showingHistory);
-		if (showingHistory)
+		showCard(CARD_MODES.equals(card) ? CARD_HISTORY : CARD_MODES);
+	}
+
+	/** Swap the body to {@code next}. Off the mode view, the History button reads "◀  Back"
+	 *  and the mode dropdown (and the review box, while reviewing) steps aside. */
+	private void showCard(String next)
+	{
+		card = next;
+		final boolean modes = CARD_MODES.equals(next);
+		historyBtn.setText(modes ? "History" : "◀  Back");
+		modeSelector.setVisible(modes);
+		if (CARD_HISTORY.equals(next))
 		{
 			controls.onRefreshHistory();
 		}
-		bodyLayout.show(bodyHost, showingHistory ? CARD_HISTORY : CARD_MODES);
+		reviewBox.setVisible(reviewCount > 0 && !CARD_REVIEW.equals(next));
+		bodyLayout.show(bodyHost, next);
+	}
+
+	/** Refresh the Needs review list; the red box shows only while something needs review. */
+	void renderReviews(List<DeathReviews.Review> reviews)
+	{
+		reviewCount = reviews.size();
+		reviewBox.setText(reviewCount == 1 ? "1 death needs review" : reviewCount + " deaths need review");
+		reviewContent.render(reviews);
+		if (reviewCount == 0 && CARD_REVIEW.equals(card))
+		{
+			showCard(CARD_MODES);
+		}
+		reviewBox.setVisible(reviewCount > 0 && !CARD_REVIEW.equals(card));
+		revalidate();
+		repaint();
 	}
 
 	/** Leave the welcome / "What's new" screen for good and reveal the panel. */

@@ -125,6 +125,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	private static final Pattern RECLAIM_SUCCESS = Pattern.compile(
 		"retrieved .*(?:gravestone|Death'?s Office)|items have been returned to you|retrieved (?:everything|all) ");
 
+	/** Any line about a grave or Death's Office - logged when no other pattern claims it. */
+	private static final Pattern GRAVE_MENTION = Pattern.compile(
+		"(?i)grave|death'?s (?:office|coffer|domain)|retriev|reclaim");
+
 	/** "Some of your dropped items are being held in a gravestone ...". */
 	private static final Pattern GRAVE_CREATED = Pattern.compile(
 		"held in a grave|gravestone.*near where you died");
@@ -402,6 +406,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	// most recent Item Retrieval Service payment seen in chat
 	private long recentReclaimFee = -1;
 	private int recentReclaimFeeTick = -1;
+	/** Tick a reclaim payment line settled a death, so its retrieval line doesn't settle another. */
+	private int paymentResolvedTick = -1;
 
 	/** union(inv, worn) as it stood at the end of each of the last few ticks. */
 	private final Deque<Map<Integer, Integer>> stateHistory = new ArrayDeque<>();
@@ -540,10 +546,15 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			{
 				names.computeIfAbsent(it.getItemId(), this::itemName);
 			}
+			final List<DeathReviews.Review> reviews = history.reviews();
 			final ProfitLossCalculatorPanel p = panel;
 			if (p != null)
 			{
-				SwingUtilities.invokeLater(() -> p.renderHistory(lifetime, names));
+				SwingUtilities.invokeLater(() ->
+				{
+					p.renderHistory(lifetime, names);
+					p.renderReviews(reviews);
+				});
 			}
 		});
 	}
@@ -722,6 +733,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	public void onGravestone(int deathId)
 	{
 		clientThread.invoke(() -> resolveDeath(deathId, 0, true));
+	}
+
+	@Override
+	public void onReviewDeath(DeathReviews.Review review, boolean approved, long fee)
+	{
+		history.reviewDeath(review, approved, fee, this::pushHistory);
 	}
 
 	@Override
@@ -913,6 +930,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		deathLossAcc.clear();
 		recentReclaimFee = -1;
 		recentReclaimFeeTick = -1;
+		paymentResolvedTick = -1;
 		lastKillByName.clear();
 		lastPlainKillTick = -100;
 		lastPlainKillName = "";
@@ -1644,6 +1662,14 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			{
 				// leave it
 			}
+			// the fee is only taken when the grave / Death's Office hands the items back, so
+			// settle the death on it rather than waiting for a retrieval line that may not
+			// match. Inside the death window finalizeDeath picks the fee up instead.
+			if (deathWindowTicks == 0 && hasPendingLoss())
+			{
+				resolveOldestPendingFromReclaim();
+				paymentResolvedTick = client.getTickCount();
+			}
 			return;
 		}
 
@@ -1655,8 +1681,34 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 		if (RECLAIM_SUCCESS.matcher(msg).find())
 		{
-			resolveOldestPendingFromReclaim();
+			// the retrieval line that follows a payment belongs to the death it already settled
+			if (paymentResolvedTick < 0 || client.getTickCount() - paymentResolvedTick > DEATH_WINDOW_TICKS)
+			{
+				resolveOldestPendingFromReclaim();
+			}
+			return;
 		}
+
+		// a grave / Death's Office line none of the patterns know - log it so missed wordings
+		// show up in the session log and can be matched. Logged even with no death pending:
+		// a grave looted after a relog lands in a later session than the death it belongs to
+		if (GRAVE_MENTION.matcher(msg).find())
+		{
+			logger.line("grave_chat").put("message", msg).submit();
+		}
+	}
+
+	/** True while a death with lost items is still waiting for its reclaim. */
+	private boolean hasPendingLoss()
+	{
+		for (DeathEntry e : pendings.values())
+		{
+			if (e.getState() == DeathEntry.State.PENDING && !e.getLostItems().isEmpty())
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1788,16 +1840,46 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		final boolean live = session != null && !sessionFinished;
 		for (BankTracker.Move m : moves)
 		{
-			final long signed = m.isDeposit() ? m.getQty() : -m.getQty();
 			if (live)
 			{
-				pendingBankMoves.add(new long[]{m.getItemId(), signed});
+				// clamp to the loot held at this moment - bankedSoFar's cap alone would let a
+				// deposit made before the loot dropped count once the same item is looted later
+				final long share = BankTracker.lootShare(m, collectedQty(m.getItemId()), bufferedBankQty(m.getItemId()));
+				if (share != 0)
+				{
+					pendingBankMoves.add(new long[]{m.getItemId(), share});
+				}
 			}
 			else
 			{
-				history.applyBankMove(m.getItemId(), signed, null, this::pushHistory);
+				history.applyBankMove(m.getItemId(), m.isDeposit() ? m.getQty() : -m.getQty(), null, this::pushHistory);
 			}
 		}
+	}
+
+	/** Quantity of {@code itemId} collected as loot this run. */
+	private long collectedQty(int itemId)
+	{
+		long collected = 0L;
+		for (IncomeEvent ie : session.getIncome())
+		{
+			collected += ie.getCollected().getOrDefault(itemId, 0);
+		}
+		return collected;
+	}
+
+	/** Net quantity of {@code itemId} this run has banked so far (deposits minus withdrawals). */
+	private long bufferedBankQty(int itemId)
+	{
+		long q = 0L;
+		for (long[] mv : pendingBankMoves)
+		{
+			if ((int) mv[0] == itemId)
+			{
+				q += mv[1];
+			}
+		}
+		return q;
 	}
 
 	@Subscribe
@@ -3536,12 +3618,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		for (Map.Entry<Integer, Long> e : movedByItem.entrySet())
 		{
 			final int id = e.getKey();
-			long collected = 0L;
-			for (IncomeEvent ie : session.getIncome())
-			{
-				collected += ie.getCollected().getOrDefault(id, 0);
-			}
-			final long banked = Math.min(Math.max(0L, e.getValue()), collected);
+			final long banked = Math.min(Math.max(0L, e.getValue()), collectedQty(id));
 			if (banked > 0)
 			{
 				gp += banked * Math.max(0, itemManager.getItemPrice(id));

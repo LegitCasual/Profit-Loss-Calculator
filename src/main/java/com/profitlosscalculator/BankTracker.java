@@ -58,4 +58,19 @@ final class BankTracker
 		});
 		return moves;
 	}
+
+	/**
+	 * The signed quantity of a live run's move that is this run's loot: a deposit counts only up
+	 * to the loot collected so far that isn't already banked, a withdrawal only up to what is.
+	 * The rest is the player's own stock - gearing up at the start of a run - and counts for
+	 * nothing, so loot collected <i>after</i> a deposit can never be read as banked by it.
+	 */
+	static long lootShare(Move m, long collected, long banked)
+	{
+		if (m.isDeposit())
+		{
+			return Math.min(m.getQty(), Math.max(0L, collected - banked));
+		}
+		return -Math.min(m.getQty(), Math.max(0L, banked));
+	}
 }

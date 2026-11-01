@@ -71,4 +71,26 @@ public class BankTrackerTest
 		assertTrue(BankTracker.diff(inv(536, 100), inv(536, 100)).isEmpty());
 		assertTrue(BankTracker.diff(inv(), inv()).isEmpty());
 	}
+
+	@Test
+	public void depositBeforeAnyLootCountsForNothing()
+	{
+		// gearing up at the start of a run - 7 mind runes of your own go in, none looted yet
+		assertEquals(0, BankTracker.lootShare(new BankTracker.Move(558, 7, true), 0, 0));
+	}
+
+	@Test
+	public void depositCountsOnlyTheLootHeldNotYetBanked()
+	{
+		assertEquals(18, BankTracker.lootShare(new BankTracker.Move(558, 25, true), 18, 0));
+		assertEquals(8, BankTracker.lootShare(new BankTracker.Move(558, 25, true), 18, 10));
+		assertEquals(0, BankTracker.lootShare(new BankTracker.Move(558, 5, true), 18, 18));
+	}
+
+	@Test
+	public void withdrawalOnlyUndoesWhatWasBanked()
+	{
+		assertEquals(-10, BankTracker.lootShare(new BankTracker.Move(558, 40, false), 18, 10));
+		assertEquals(0, BankTracker.lootShare(new BankTracker.Move(558, 40, false), 18, 0));
+	}
 }

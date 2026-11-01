@@ -35,10 +35,10 @@ import net.runelite.client.util.LinkBrowser;
 class WhatsNewContent extends JPanel
 {
 	/** The release these notes belong to - shown on the screen, and what "seen" is keyed on. */
-	static final String VERSION = "0.4";
+	static final String VERSION = "0.4.1";
 
 	/** Display only. */
-	static final String RELEASE_DATE = "27 Oct 2026";
+	static final String RELEASE_DATE = "28 Oct 2026";
 
 	/** True unless {@code confirmedVersion} (the version last OK'd; blank = never) is this one. */
 	static boolean isUnseen(String confirmedVersion)
@@ -48,15 +48,14 @@ class WhatsNewContent extends JPanel
 
 	/** Player-facing, one short line each - the panel is ~215px wide. */
 	static final List<String> NOTES = Collections.unmodifiableList(Arrays.asList(
-		"<b>New: every spellbook.</b> Ancient, Lunar and Arceuus spells now count as costs - "
-			+ "thralls, Vengeance, teleports and more.",
-		"Standard spells that were missing are in too, including jewellery enchants.",
-		"A spell is only charged once its runes are used, so a cast the game refuses costs "
-			+ "nothing.",
-		"Runes in your rune pouch are counted the same as runes in your inventory.",
-		"If a spell isn't counted or costs the wrong amount, please raise an issue on GitHub "
-			+ "with the spell's name.",
-		"The <b>Report an issue</b> button is now at the top of every tab."
+		"<b>New: Needs review.</b> If a session ends before you loot your grave - say you "
+			+ "log out - a red box appears at the top of the panel.",
+		"Open it to see what the death was charged and the items you dropped. <b>Approve</b> "
+			+ "if they were lost, <b>Deny</b> if you got them back and only the grave fee counts.",
+		"Deaths from before this update that were charged as a full loss are in the list too.",
+		"Paying your grave fee now settles the death straight away, using the exact fee from chat.",
+		"Fixed: banking your own items before any loot dropped could show up as banked loot.",
+		"If a death still looks wrong, please raise an issue on GitHub."
 	));
 
 	/** Optional sign-off under the notes - {@code null} to leave it out for a release. */

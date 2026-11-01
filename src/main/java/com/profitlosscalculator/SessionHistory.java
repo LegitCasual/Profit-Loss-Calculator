@@ -83,6 +83,10 @@ class SessionHistory
 	private volatile Snapshot snapshot = Snapshot.EMPTY;
 	/** Parsed cost lines per session log, for the dashboard. Touched only on the executor thread. */
 	private final Map<Path, CachedLog> costLogCache = new HashMap<>();
+	/** Unreviewed full-loss deaths per session log. Touched only on the executor thread. */
+	private final Map<Path, CachedReviews> reviewCache = new HashMap<>();
+	/** Deaths waiting in the Needs review list, oldest first, as of the last publish. */
+	private volatile List<DeathReviews.Review> reviews = new ArrayList<>();
 
 	@Inject
 	SessionHistory(Gson gson)
@@ -112,6 +116,103 @@ class SessionHistory
 	Snapshot snapshot()
 	{
 		return snapshot;
+	}
+
+	/** Deaths waiting in the Needs review list, as of the last snapshot. */
+	List<DeathReviews.Review> reviews()
+	{
+		return reviews;
+	}
+
+	/**
+	 * Record the player's verdict on a full-loss death: appends a {@code death_reviewed} line to
+	 * its session log and, on a Deny, lowers the run's cost from the full value to {@code fee}.
+	 */
+	void reviewDeath(DeathReviews.Review r, boolean approved, long fee, Consumer<Snapshot> cb)
+	{
+		run(() ->
+		{
+			final long gp = approved ? r.getCharged() : Math.min(r.getCharged(), Math.max(0, fee));
+			final Map<String, Object> line = new LinkedHashMap<>();
+			line.put("ts", Instant.now().toString());
+			line.put("event", "death_reviewed");
+			line.put("deathId", r.getDeathId());
+			line.put("verdict", approved ? "approved" : "denied");
+			line.put("gp", gp);
+			try
+			{
+				Files.write(dir().resolve(r.getLog()), (gson.toJson(line) + "\n").getBytes(StandardCharsets.UTF_8),
+					StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+				if (!approved)
+				{
+					final RunRecord run = runAt(r.getRunStart());
+					final String mob = DeathReviews.attribute(run, r.getCharged());
+					if (mob != null)
+					{
+						DeathReviews.refund(run, mob, r.getCharged() - gp);
+						rewrite();
+					}
+				}
+			}
+			catch (IOException e)
+			{
+				log.warn("could not record death review", e);
+			}
+			publish(cb);
+		});
+	}
+
+	private RunRecord runAt(String start)
+	{
+		for (RunRecord rr : entries)
+		{
+			if (rr != null && java.util.Objects.equals(rr.getStart(), start))
+			{
+				return rr;
+			}
+		}
+		return null;
+	}
+
+	/** Re-read the Needs review list from the session logs whose run made it into history. A
+	 *  file is only re-parsed when its size or modified time has changed since the last read. */
+	private List<DeathReviews.Review> scanReviews() throws IOException
+	{
+		final List<Path> logs;
+		try (Stream<Path> s = Files.list(dir()))
+		{
+			logs = s.filter(p ->
+			{
+				final String n = p.getFileName().toString();
+				return n.startsWith("session-") && n.endsWith(".jsonl");
+			}).collect(Collectors.toList());
+		}
+		final List<DeathReviews.Review> out = new ArrayList<>();
+		final Map<Path, CachedReviews> next = new HashMap<>();
+		for (Path p : logs)
+		{
+			final long size = Files.size(p);
+			final long modified = Files.getLastModifiedTime(p).toMillis();
+			CachedReviews c = reviewCache.get(p);
+			if (c == null || c.size != size || c.modified != modified)
+			{
+				c = new CachedReviews(size, modified,
+					DeathReviews.scan(p.getFileName().toString(), Files.readAllLines(p, StandardCharsets.UTF_8)));
+			}
+			next.put(p, c);
+			for (DeathReviews.Review r : c.reviews)
+			{
+				final RunRecord run = runAt(r.getRunStart());
+				if (run != null)
+				{
+					out.add(r.withMob(DeathReviews.attribute(run, r.getCharged())));
+				}
+			}
+		}
+		reviewCache.clear();
+		reviewCache.putAll(next);
+		out.sort(Comparator.comparing(r -> r.getAt() == null ? "" : r.getAt()));
+		return out;
 	}
 
 	/** Copies of every recorded run and sale, plus every cost line from the session logs, for
@@ -174,19 +275,35 @@ class SessionHistory
 			{
 				String start = null;
 				final List<CostLine> lines = new ArrayList<>();
+				// deathId -> index of its charge in lines, so a later review can replace it
+				final Map<Long, Integer> deathLine = new HashMap<>();
 				for (String line : Files.readAllLines(p, StandardCharsets.UTF_8))
 				{
 					final JsonObject o = asObject(line);
-					if (start == null && "session_start".equals(str(o, "event")))
+					final String ev = str(o, "event");
+					if (start == null && "session_start".equals(ev))
 					{
 						start = str(o, "startedAt");
+					}
+					final Integer prior = "death_reviewed".equals(ev) ? deathLine.get(lng(o, "deathId")) : null;
+					if (prior != null && lines.get(prior) != null)
+					{
+						final CostLine was = lines.get(prior);
+						final long gp = lng(o, "gp");
+						lines.set(prior, gp > 0 ? new CostLine(was.getAt(), was.getType(), was.getLabel(), gp, 1) : null);
+						continue;
 					}
 					final CostLine cl = costLine(o);
 					if (cl != null)
 					{
+						if ("death_resolved".equals(ev))
+						{
+							deathLine.put(lng(o, "deathId"), lines.size());
+						}
 						lines.add(cl);
 					}
 				}
+				lines.removeIf(java.util.Objects::isNull);
 				c = new CachedLog(size, modified, start, lines);
 			}
 			next.put(p, c);
@@ -694,6 +811,14 @@ class SessionHistory
 	private void publish(Consumer<Snapshot> cb)
 	{
 		snapshot = aggregate(entries, realised, banked);
+		try
+		{
+			reviews = scanReviews();
+		}
+		catch (IOException | RuntimeException e)
+		{
+			log.warn("could not scan session logs for deaths to review", e);
+		}
 		if (cb != null)
 		{
 			cb.accept(snapshot);
@@ -1131,7 +1256,7 @@ class SessionHistory
 		return out;
 	}
 
-	private static JsonObject asObject(String line)
+	static JsonObject asObject(String line)
 	{
 		try
 		{
@@ -1144,12 +1269,12 @@ class SessionHistory
 		}
 	}
 
-	private static String str(JsonObject o, String k)
+	static String str(JsonObject o, String k)
 	{
 		return o != null && o.has(k) && o.get(k).isJsonPrimitive() ? o.get(k).getAsString() : null;
 	}
 
-	private static long lng(JsonObject o, String k)
+	static long lng(JsonObject o, String k)
 	{
 		try
 		{
@@ -1470,6 +1595,20 @@ class SessionHistory
 		long gp;
 		/** units used (a consumable's qty), else 1 per event. */
 		long count;
+	}
+
+	private static final class CachedReviews
+	{
+		private final long size;
+		private final long modified;
+		private final List<DeathReviews.Review> reviews;
+
+		private CachedReviews(long size, long modified, List<DeathReviews.Review> reviews)
+		{
+			this.size = size;
+			this.modified = modified;
+			this.reviews = reviews;
+		}
 	}
 
 	private static final class CachedLog
