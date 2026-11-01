@@ -108,22 +108,27 @@ final class PanelUi
 	{
 		final long potential = view.getNet();
 		final boolean cashed = view.getRealisedSoFar() > 0 || view.getBankedSoFar() > 0;
+		final JLabel potentialCell = statCell("Potential net", sign(potential),
+			potential >= 0 ? GAIN_COLOR : LOSS_COLOR, !cashed);
+		// an alch-only run reads as a loss here - say what the figure leaves out
+		potentialCell.setToolTipText(POTENTIAL_NET_TIP);
 		if (cashed)
 		{
 			final long actual = view.getActualNet();
 			grid.add(statCell("Actual net", sign(actual), actual >= 0 ? GAIN_COLOR : LOSS_COLOR, true));
 			grid.add(topRight);
-			grid.add(statCell("Potential net", sign(potential),
-				potential >= 0 ? GAIN_COLOR : LOSS_COLOR, false));
+			grid.add(potentialCell);
 			grid.add(new JLabel());
 		}
 		else
 		{
-			grid.add(statCell("Potential net", sign(potential),
-				potential >= 0 ? GAIN_COLOR : LOSS_COLOR, true));
+			grid.add(potentialCell);
 			grid.add(topRight);
 		}
 	}
+
+	static final String POTENTIAL_NET_TIP = "<html>This run's loot at its looted value, minus costs.<br>"
+		+ "Doesn't include High Alchs or GE sales - see Actual net.</html>";
 
 	/** Adds "Realised" / "Banked" cells to the 2-column stat grid when loot has been alched or
 	 *  banked mid-run. Real realised / banked totals live in the History tab - this is a hint

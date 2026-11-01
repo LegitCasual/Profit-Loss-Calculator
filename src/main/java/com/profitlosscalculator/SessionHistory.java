@@ -544,7 +544,7 @@ class SessionHistory
 			{
 				return;
 			}
-			appendRealised(matchRealised("ge", sale.getItemId(), sale.getQty(),
+			appendRealised(matchRealised(entries, realised, "ge", sale.getItemId(), sale.getQty(),
 				sale.getGross(), sale.getTax(), Instant.now().toString()), cb);
 		});
 	}
@@ -552,7 +552,29 @@ class SessionHistory
 	/** A High Alchemy of a looted item - a realisation at the HA coin value, one unit, no tax. */
 	void applyAlch(int itemId, long haCoins, String mob, String preferRunStart, String at, Consumer<Snapshot> cb)
 	{
-		run(() -> appendRealised(matchRealised("alch", itemId, 1, haCoins, 0, at), cb));
+		run(() -> appendRealised(matchRealised(entries, realised, "alch", itemId, 1, haCoins, 0, at), cb));
+	}
+
+	/** Looted-but-unrealised quantity of {@code itemId} from every recorded run except the one
+	 *  started at {@code excludeRunStart} (the live run, which an ambient checkpoint may already
+	 *  have written) - what a live alch of it could still realise against from earlier runs. */
+	void unrealisedOutside(int itemId, String excludeRunStart, Consumer<Long> cb)
+	{
+		run(() -> cb.accept(unrealisedOutside(entries, realised, itemId, excludeRunStart)));
+	}
+
+	static long unrealisedOutside(List<RunRecord> entries, List<RealisedEntry> realised, int itemId,
+		String excludeRunStart)
+	{
+		final List<RunRecord> others = new ArrayList<>();
+		for (RunRecord r : entries)
+		{
+			if (r != null && !java.util.Objects.equals(r.getStart(), excludeRunStart))
+			{
+				others.add(r);
+			}
+		}
+		return Math.max(0, lootedOf(others, itemId)[0] - realisedQtyOf(realised, itemId));
 	}
 
 	/**
@@ -561,7 +583,8 @@ class SessionHistory
 	 * pro-rate the proceeds to that, return a {@link RealisedEntry} (or null - never looted,
 	 * or already fully realised).
 	 */
-	private RealisedEntry matchRealised(String kind, int itemId, long want, long gross, long tax, String at)
+	static RealisedEntry matchRealised(List<RunRecord> entries, List<RealisedEntry> realised, String kind,
+		int itemId, long want, long gross, long tax, String at)
 	{
 		if (want <= 0 || itemId <= 0 || itemId == COINS || itemId == PLATINUM)
 		{

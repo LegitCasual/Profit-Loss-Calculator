@@ -373,6 +373,10 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	/** coins already booked as High Alchemy income - kept out of the loot reconciliation so
 	 *  they aren't also credited to an open drop. */
 	private final Map<Integer, Integer> alchCredited = new HashMap<>();
+	/** per alched item: loot from earlier runs still unrealised in history, as last reported by
+	 *  {@link SessionHistory#unrealisedOutside} - caps what {@link #realisedSoFar} counts.
+	 *  Written from the history executor. */
+	private final Map<Integer, Long> priorLootAvail = new java.util.concurrent.ConcurrentHashMap<>();
 	private final IncomeValuation.PriceLookup priceLookup = new IncomeValuation.PriceLookup()
 	{
 		@Override
@@ -958,6 +962,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		dropIntent.clear();
 		droppedOut.clear();
 		alchCredited.clear();
+		priorLootAvail.clear();
 		pendingCasts.clear();
 		pendingBankMoves.clear();
 		pendingAlch.clear();
@@ -3242,6 +3247,18 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return;
 		}
 		session.addAlchedItem(itemId, 1);
+		if (history != null && !priorLootAvail.containsKey(itemId))
+		{
+			final Session run = session;
+			history.unrealisedOutside(itemId, run.getStartTime().toString(), n ->
+			{
+				if (session == run)
+				{
+					priorLootAvail.put(itemId, n);
+					clientThread.invoke(this::refreshView);
+				}
+			});
+		}
 		pendingAlch.add(new long[]{itemId, coins});
 		pendingAlchMob.add(costMob());
 		alchCredited.merge(ItemID.COINS, (int) coins, Integer::sum);
@@ -3585,13 +3602,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	}
 
 	/** HA coin value alched during this run so far - a live hint; the real realised total is
-	 *  History-tab only (see {@link SessionHistory#applyAlch}). */
+	 *  History-tab only (see {@link SessionHistory#applyAlch}). Like History, an alch counts only
+	 *  while it can match loot - collected this run, or still unrealised from earlier runs - so
+	 *  alching bought / banked stock doesn't read as profit here and then vanish at Stop. */
 	private long realisedSoFar()
 	{
+		final Map<Integer, Long> left = new HashMap<>();
 		long gp = 0;
 		for (long[] a : pendingAlch)
 		{
-			gp += a[1];
+			final int id = (int) a[0];
+			final long avail = left.computeIfAbsent(id, k ->
+			{
+				long collected = 0;
+				for (IncomeEvent e : session.getIncome())
+				{
+					collected += e.getCollected().getOrDefault(k, 0);
+				}
+				return collected + priorLootAvail.getOrDefault(k, 0L);
+			});
+			if (avail > 0)
+			{
+				gp += a[1];
+				left.put(id, avail - 1);
+			}
 		}
 		return gp;
 	}
@@ -3723,26 +3757,9 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			e.getItems().forEach((id, q) -> drop.get(mob).merge(id, q, Integer::sum));
 		}
 
-		// a High Alched looted item is realised, not potential - drop it from "gained", and from
-		// "dropped" too: it was picked up, so it mustn't read as loot left on the floor
-		final Map<Integer, Integer> alched = new HashMap<>(session.getAlchedItems());
-		for (Map.Entry<String, Map<Integer, Integer>> me : got.entrySet())
-		{
-			final Map<Integer, Integer> mobItems = me.getValue();
-			final Map<Integer, Integer> mobDrops = drop.get(me.getKey());
-			for (Map.Entry<Integer, Integer> ae : alched.entrySet())
-			{
-				final Integer have = mobItems.get(ae.getKey());
-				if (ae.getValue() <= 0 || have == null || have <= 0)
-				{
-					continue;
-				}
-				final int take = Math.min(have, ae.getValue());
-				mobItems.put(ae.getKey(), have - take);
-				mobDrops.merge(ae.getKey(), -take, Integer::sum);
-				ae.setValue(ae.getValue() - take);
-			}
-		}
+		// High Alched loot stays in "gained": the loot ledger must still hold it so the alch
+		// replayed at Stop (SessionHistory#applyAlch) has something to realise against - the
+		// same way a GE sale swaps a looted item's snapshot value for its proceeds
 		session.getKillsByMob().forEach((mob, n) ->
 		{
 			if (keep.test(mob))

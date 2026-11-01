@@ -115,9 +115,11 @@ class ProfitLossCalculatorOverlay extends Overlay
 		}
 
 		final ProfitLossCalculatorPanel.View v = plugin.currentView();
-		final boolean profit = v.getNet() >= 0;
+		// same headline as the side panel: the actual net once anything's been cashed out
+		final long headline = v.getRealisedSoFar() > 0 || v.getBankedSoFar() > 0 ? v.getActualNet() : v.getNet();
+		final boolean profit = headline >= 0;
 
-		final String netText = signed(v.getNet());
+		final String netText = signed(headline);
 		final String rateText = v.getNetPerHour() != 0 ? "  " + signed(v.getNetPerHour()) + "/hr" : "";
 
 		final FontMetrics fm = graphics.getFontMetrics();
@@ -276,7 +278,8 @@ class ProfitLossCalculatorOverlay extends Overlay
 		panel.getChildren().add(line("Potential net", gp(v.getNet()), netColor));
 		if (v.getNetPerHour() != 0)
 		{
-			panel.getChildren().add(line("Net / hr", gp(v.getNetPerHour()), netColor));
+			panel.getChildren().add(line("Net / hr", gp(v.getNetPerHour()), v.getNetPerHour() >= 0
+				? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR));
 		}
 		panel.getChildren().add(line("Potential", gp(v.getGains()), Color.WHITE));
 		if (v.getPotential() != v.getGains())
