@@ -55,7 +55,14 @@ class WhatsNewContent extends JPanel
 		"Deaths from before this update that were charged as a full loss are in the list too.",
 		"Paying your grave fee now settles the death straight away, using the exact fee from chat.",
 		"Fixed: banking your own items before any loot dropped could show up as banked loot.",
-		"If a death still looks wrong, please raise an issue on GitHub."
+		"If a death still looks wrong, please raise an issue on GitHub.",
+		"Fixed: High Alching loot now counts in History and the dashboard, not just the live "
+			+ "panel - including loot from earlier sessions you alch at the end of a grind.",
+		"Alching items you didn't loot only counts the rune cost, and the live panel no longer "
+			+ "adds their coins either.",
+		"The overlay now shows your actual net once you've alched or banked loot, matching the "
+			+ "side panel.",
+		"Hover Potential net to see what it leaves out."
 	));
 
 	/** Optional sign-off under the notes - {@code null} to leave it out for a release. */
