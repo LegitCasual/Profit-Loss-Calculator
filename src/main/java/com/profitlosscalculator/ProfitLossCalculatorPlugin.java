@@ -286,6 +286,12 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	// ammo + teleport tracking
 	private final AmmoTracker ammoTracker = new AmmoTracker();
 	private boolean bankOpen;
+	/** true while either player-trade screen is up (see {@link #updateTradeState}). */
+	private boolean tradeOpen;
+	/** tick the last trade screen closed - accrual stays paused {@link #TRADE_SETTLE_TICKS} past it. */
+	private int tradeClosedTick = -1000;
+	/** the traded items can land a tick either side of the trade screen closing. */
+	private static final int TRADE_SETTLE_TICKS = 2;
 	/** teleport-jewellery variant id -&gt; charges it represents; built once, first session. */
 	private Map<Integer, Integer> teleChargesById = Collections.emptyMap();
 	/** teleport-jewellery group base -&gt; gp value of one charge (best tradeable variant / its charges). */
@@ -1548,6 +1554,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			viewDirty = true;
 		}
 		updateBankState();
+		updateTradeState();
 		pushStateHistory();
 		trackOpponent();
 
@@ -1571,7 +1578,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// eagerly per event, so a multi-step action (e.g. loading a cannonball: inventory count
 		// drops and the loaded-count varp rises as two separate events) can never be read as a
 		// real fire/pickup just because one half of it landed before the other.
-		final boolean accrue = deathWindowTicks == 0 && !bankOpen && !session.isPaused();
+		final boolean accrue = deathWindowTicks == 0 && !bankOpen && !tradeSettling()
+			&& !session.isPaused();
 
 		// a thrown weapon ripped from the slot by Blue Moon's ice and handed back is not fired ammo
 		reconcileAmmo(accrue && !weaponFrozen);
@@ -1809,6 +1817,30 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			pickupTracker.reset();
 			prevTickItems = trackedItems();
 		}
+	}
+
+	/**
+	 * Player-trade open/close. Items handed over in a trade are neither fired ammo nor loot -
+	 * giving back a stack someone lent you would otherwise read as firing all of it - so
+	 * accrual pauses like it does for the bank, and the trackers just re-base past the swap.
+	 */
+	private void updateTradeState()
+	{
+		final boolean nowTrade = client.getWidget(InterfaceID.Trademain.UNIVERSE) != null
+			|| client.getWidget(InterfaceID.Tradeconfirm.UNIVERSE) != null;
+		if (tradeOpen && !nowTrade)
+		{
+			tradeClosedTick = client.getTickCount();
+		}
+		tradeOpen = nowTrade;
+	}
+
+	/** True while a trade is open or its items may still be landing. */
+	private boolean tradeSettling()
+	{
+		// the tick counter restarts on relog - a negative gap is a stale close, not a recent one
+		final int since = client.getTickCount() - tradeClosedTick;
+		return tradeOpen || (since >= 0 && since <= TRADE_SETTLE_TICKS);
 	}
 
 	/** True while the bank or a deposit box is open - the window banked-loot tracking runs in. */
@@ -2856,7 +2888,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			return;
 		}
 		// always reconcile so the baseline stays current; only charge when tracking is on
-		// and not paused (death window / bank open)
+		// and not paused (death window / bank or trade open)
 		final boolean moved = ammoTracker.reconcile(ammoOwned(), accrue && config.trackAmmo());
 		if (!moved)
 		{
