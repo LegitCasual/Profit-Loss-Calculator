@@ -421,6 +421,8 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	/** union(inv, worn) as it stood at the end of each of the last few ticks. */
 	private final Deque<Map<Integer, Integer>> stateHistory = new ArrayDeque<>();
+	/** Per-tick ammo tracker states, kept so a death can undo the stack it misread as fired. */
+	private final Deque<AmmoTracker.Snapshot> ammoHistory = new ArrayDeque<>();
 
 	private final Map<Integer, DeathEntry> pendings = new LinkedHashMap<>();
 
@@ -959,7 +961,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 			teleChargesById = buildTeleChargeMap();
 			teleCostPerCharge = buildTelePerChargeCost();
 		}
-		ammoTracker.reset(ammoOwned());
+		resetAmmo();
 		chargedWeaponTracker.reset();
 		skillingTracker.reset(currentSkillXp());
 		blueMoonFreeze.reset();
@@ -1011,7 +1013,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		session.setPaused(paused);
 		// re-base the trackers past the paused stretch so banking / afk doesn't accrue
-		ammoTracker.reset(ammoOwned());
+		resetAmmo();
 		skillingTracker.reset(currentSkillXp());
 		pickupTracker.reset();
 		prevTickItems = trackedItems();
@@ -1583,6 +1585,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 		// a thrown weapon ripped from the slot by Blue Moon's ice and handed back is not fired ammo
 		reconcileAmmo(accrue && !weaponFrozen);
+		pushAmmoHistory();
 
 		// teleport charge drops and ground pickups are read once per tick so equipping /
 		// unequipping jewellery (item moves inv<->worn within a tick, net zero) never looks
@@ -1772,7 +1775,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 
 	private void pushStateHistory()
 	{
-		stateHistory.addLast(ContainerSnapshot.union(lastKnownInv, lastKnownWorn));
+		stateHistory.addLast(deathKit());
 		while (stateHistory.size() > STATE_HISTORY_TICKS)
 		{
 			stateHistory.removeFirst();
@@ -1785,11 +1788,64 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	{
 		if (stateHistory.isEmpty())
 		{
-			return ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+			return deathKit();
 		}
 		final List<Map<Integer, Integer>> h = new ArrayList<>(stateHistory);
 		final int idx = Math.max(0, h.size() - 1 - PRE_DEATH_LOOKBACK_TICKS);
 		return h.get(idx);
+	}
+
+	/** Inventory + equipment + Dizana's quiver contents - everything a death can strip. The
+	 *  quiver holds its ammo in varps, not an item container, so it is added by hand. */
+	private Map<Integer, Integer> deathKit()
+	{
+		final Map<Integer, Integer> kit = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		final int quiverId = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO);
+		final int quiverQty = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO_AMOUNT);
+		if (quiverId > 0 && quiverQty > 0)
+		{
+			kit.merge(quiverId, quiverQty, Integer::sum);
+		}
+		return kit;
+	}
+
+	/** Trip boundary for ammo: re-base on what is owned now, and drop the history so a death
+	 *  can never roll the tracker back to a state from before the boundary. */
+	private void resetAmmo()
+	{
+		ammoTracker.reset(ammoOwned());
+		ammoHistory.clear();
+		pushAmmoHistory();
+	}
+
+	private void pushAmmoHistory()
+	{
+		ammoHistory.addLast(ammoTracker.snapshot());
+		while (ammoHistory.size() > STATE_HISTORY_TICKS)
+		{
+			ammoHistory.removeFirst();
+		}
+	}
+
+	/**
+	 * The kit is already gone when {@code ActorDeath} fires (see {@link #PRE_DEATH_LOOKBACK_TICKS}),
+	 * and on the tick it vanished accrual was still on - so the ammo slot / quiver emptying was
+	 * charged as fired ammo. That ammo is the death's to price (it is in {@link #preDeathState}),
+	 * so roll the tracker back to the same point the death snapshot was taken from and re-base.
+	 * Anything fired before the death is gone for good, so a reclaim isn't credited as a pickup.
+	 */
+	private void rollBackAmmoForDeath()
+	{
+		if (!ammoHistory.isEmpty())
+		{
+			final List<AmmoTracker.Snapshot> h = new ArrayList<>(ammoHistory);
+			ammoTracker.restore(h.get(Math.max(0, h.size() - 1 - PRE_DEATH_LOOKBACK_TICKS)));
+		}
+		ammoTracker.reconcile(ammoOwned(), false);
+		ammoTracker.forfeitOutstanding();
+		ammoHistory.clear();
+		pushAmmoHistory();
+		priceAmmo();
 	}
 
 	/**
@@ -1813,7 +1869,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 		else
 		{
-			ammoTracker.reset(ammoOwned());
+			resetAmmo();
 			pickupTracker.reset();
 			prevTickItems = trackedItems();
 		}
@@ -2006,6 +2062,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		}
 
 		preDeathState = preDeathSnapshot();
+		rollBackAmmoForDeath();
 		deathLossAcc.clear();
 		deathGraveConfirmed = false;
 		deathWindowTicks = DEATH_WINDOW_TICKS;
@@ -2573,7 +2630,7 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 	 *  grave reclaim still leaves a trace. */
 	private void accumulateDeathLoss()
 	{
-		final Map<Integer, Integer> current = ContainerSnapshot.union(lastKnownInv, lastKnownWorn);
+		final Map<Integer, Integer> current = deathKit();
 		preDeathState.forEach((id, preQty) ->
 		{
 			final int missing = preQty - current.getOrDefault(id, 0);
@@ -2890,7 +2947,16 @@ public class ProfitLossCalculatorPlugin extends Plugin implements ProfitLossCalc
 		// always reconcile so the baseline stays current; only charge when tracking is on
 		// and not paused (death window / bank or trade open)
 		final boolean moved = ammoTracker.reconcile(ammoOwned(), accrue && config.trackAmmo());
-		if (!moved)
+		if (moved)
+		{
+			priceAmmo();
+		}
+	}
+
+	/** Re-price the ammo spend and charge its change to whoever is being shot at. */
+	private void priceAmmo()
+	{
+		if (session == null)
 		{
 			return;
 		}

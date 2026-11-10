@@ -86,4 +86,48 @@ public class AmmoTrackerTest
 		t.reset(owned(ARROW, 80));
 		assertTrue(t.stats().isEmpty());
 	}
+
+	@Test
+	public void restoreUndoesAStackStrippedByADeathBeforeTheDeathEventArrived()
+	{
+		final AmmoTracker t = new AmmoTracker();
+		t.reset(owned(ARROW, 500));
+		t.reconcile(owned(ARROW, 480), true);               // really fired 20
+		final AmmoTracker.Snapshot beforeDeath = t.snapshot();
+
+		t.reconcile(owned(), true);                         // death strips the quiver, read as fired
+		assertArrayEquals(new long[]{500, 0, 500}, t.stats().get(ARROW));
+
+		t.restore(beforeDeath);
+		t.reconcile(owned(), false);                        // re-base onto the stripped kit
+		assertArrayEquals(new long[]{20, 0, 20}, t.stats().get(ARROW));
+	}
+
+	@Test
+	public void reclaimingTheKitAfterADeathIsNotAPickup()
+	{
+		final AmmoTracker t = new AmmoTracker();
+		t.reset(owned(ARROW, 500));
+		t.reconcile(owned(ARROW, 480), true);               // fired 20, still on the floor
+		t.reconcile(owned(), false);                        // died
+		t.forfeitOutstanding();
+
+		t.reconcile(owned(ARROW, 480), true);               // grave hands the quiver back
+		assertArrayEquals(new long[]{20, 0, 20}, t.stats().get(ARROW));
+		t.reconcile(owned(ARROW, 470), true);               // firing carries on from there
+		t.reconcile(owned(ARROW, 475), true);               // and new shots are still recoverable
+		assertArrayEquals(new long[]{30, 5, 25}, t.stats().get(ARROW));
+	}
+
+	@Test
+	public void snapshotIsNotAffectedByLaterChanges()
+	{
+		final AmmoTracker t = new AmmoTracker();
+		t.reset(owned(ARROW, 100));
+		final AmmoTracker.Snapshot s = t.snapshot();
+		t.reconcile(owned(ARROW, 50), true);
+		t.restore(s);
+		assertNull(t.stats().get(ARROW));
+		assertFalse(t.reconcile(owned(ARROW, 100), true));
+	}
 }

@@ -30,6 +30,8 @@ class AmmoTracker
 	private final Map<Integer, Long> baseline = new HashMap<>();
 	private final Map<Integer, Long> fired = new LinkedHashMap<>();
 	private final Map<Integer, Long> recovered = new HashMap<>();
+	/** Fired ammo written off by {@link #forfeitOutstanding} - no longer out there to pick up. */
+	private final Map<Integer, Long> forfeited = new HashMap<>();
 
 	/** Ids currently carrying a baseline - the plugin also totals their inventory copies. */
 	Set<Integer> tracked()
@@ -43,6 +45,7 @@ class AmmoTracker
 		baseline.clear();
 		fired.clear();
 		recovered.clear();
+		forfeited.clear();
 		owned.forEach((id, qty) ->
 		{
 			if (qty > 0)
@@ -78,8 +81,8 @@ class AmmoTracker
 			{
 				// a rise while this id is tracked = picking your own ammo back up, but only
 				// up to what is still out there - anything more is a restock, not recovery
-				final long outstanding = Math.max(0L,
-					fired.getOrDefault(id, 0L) - recovered.getOrDefault(id, 0L));
+				final long outstanding = Math.max(0L, fired.getOrDefault(id, 0L)
+					- recovered.getOrDefault(id, 0L) - forfeited.getOrDefault(id, 0L));
 				final long pickedUp = Math.min(now - before, outstanding);
 				if (pickedUp > 0)
 				{
@@ -99,6 +102,59 @@ class AmmoTracker
 		}
 
 		return changed;
+	}
+
+	/**
+	 * Everything fired so far is gone for good (the player died and respawned away from it),
+	 * so a later rise - the grave / Death's Office handing the kit back - is a restock, not
+	 * ammo picked back up. The net spend is unchanged.
+	 */
+	void forfeitOutstanding()
+	{
+		fired.forEach((id, f) -> forfeited.put(id,
+			Math.max(0L, f - recovered.getOrDefault(id, 0L))));
+	}
+
+	/** Frozen copy of this tracker's state, for {@link #restore}. */
+	Snapshot snapshot()
+	{
+		return new Snapshot(baseline, fired, recovered, forfeited);
+	}
+
+	/**
+	 * Roll back to {@code s}, undoing every fire / recovery since it was taken. Used on death:
+	 * the client strips the kit a tick or two before the death event arrives, so that drop has
+	 * already been read as firing the whole stack by the time the plugin knows it was a death.
+	 */
+	void restore(Snapshot s)
+	{
+		copy(s.baseline, baseline);
+		copy(s.fired, fired);
+		copy(s.recovered, recovered);
+		copy(s.forfeited, forfeited);
+	}
+
+	private static void copy(Map<Integer, Long> from, Map<Integer, Long> to)
+	{
+		to.clear();
+		to.putAll(from);
+	}
+
+	static final class Snapshot
+	{
+		private final Map<Integer, Long> baseline;
+		private final Map<Integer, Long> fired;
+		private final Map<Integer, Long> recovered;
+		private final Map<Integer, Long> forfeited;
+
+		private Snapshot(Map<Integer, Long> baseline, Map<Integer, Long> fired,
+			Map<Integer, Long> recovered, Map<Integer, Long> forfeited)
+		{
+			this.baseline = new HashMap<>(baseline);
+			this.fired = new LinkedHashMap<>(fired);
+			this.recovered = new HashMap<>(recovered);
+			this.forfeited = new HashMap<>(forfeited);
+		}
 	}
 
 	/** id -&gt; {fired, recovered, net} for this window; net = max(0, fired - recovered). */
